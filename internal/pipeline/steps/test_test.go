@@ -3,9 +3,11 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -13,6 +15,103 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestTestStep_CleansOwnedTemporaryDDEVRegistrationAfterTestFailure(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Repo.ID = "1289b3"
+	generated := "source-project-no-mistakes-" + sctx.Repo.ID
+
+	if err := os.Mkdir(filepath.Join(dir, ".ddev"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".ddev", "config.yaml"), []byte("name: source-project\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sctx.EvidenceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(sctx.EvidenceDir, "evidence.txt")
+	if err := os.WriteFile(artifact, []byte("retain me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	logFile := filepath.Join(t.TempDir(), "ddev.log")
+	listFile := filepath.Join(t.TempDir(), "ddev-list.json")
+	if err := os.WriteFile(listFile, []byte(fmt.Sprintf(`[{"name":%q,"approot":%q},{"name":"source-project","approot":%q}]`, generated, dir, t.TempDir())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := fakeCLIBinDir(t)
+	if err := os.WriteFile(filepath.Join(binDir, "ddev"), []byte(`#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_DDEV_LOG"
+if [ "$1" = list ]; then cat "$FAKE_DDEV_LIST"; exit 0; fi
+if [ "$1" = stop ] && [ "$2" = --unlist ]; then exit 0; fi
+exit 1
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Env = fakeCLIEnv(binDir, map[string]string{
+		"FAKE_DDEV_LOG":  logFile,
+		"FAKE_DDEV_LIST": listFile,
+	})
+	sctx.Config.Commands.Test = "exit 1"
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.NeedsApproval || outcome.ExitCode != 1 {
+		t.Fatalf("test failure outcome = %+v, want preserved exit 1 approval", outcome)
+	}
+	gotLog, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Fields(string(gotLog)), []string{"list", "--json-output", "stop", "--unlist", generated}; !slices.Equal(got, want) {
+		t.Fatalf("ddev commands = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("worktree removed: %v", err)
+	}
+	if _, err := os.Stat(artifact); err != nil {
+		t.Fatalf("test evidence removed: %v", err)
+	}
+	if run, err := sctx.DB.GetRun(sctx.Run.ID); err != nil || run == nil || run.ID != sctx.Run.ID {
+		t.Fatalf("run state lost: run=%+v err=%v", run, err)
+	}
+}
+
+func TestTestStep_DoesNotUnlistAnUnregisteredDDEVProject(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "exit 1"})
+	if err := os.Mkdir(filepath.Join(dir, ".ddev"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".ddev", "config.yaml"), []byte("name: source-project\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logFile := filepath.Join(t.TempDir(), "ddev.log")
+	binDir := fakeCLIBinDir(t)
+	if err := os.WriteFile(filepath.Join(binDir, "ddev"), []byte(`#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_DDEV_LOG"
+if [ "$1" = list ]; then echo '[]'; exit 0; fi
+exit 1
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Env = fakeCLIEnv(binDir, map[string]string{"FAKE_DDEV_LOG": logFile})
+
+	if _, err := (&TestStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Fields(string(data)), []string{"list", "--json-output"}; !slices.Equal(got, want) {
+		t.Fatalf("DDEV commands = %q, want %q", got, want)
+	}
+}
 
 func TestTestStep_FixMode(t *testing.T) {
 	t.Parallel()
