@@ -17,6 +17,11 @@ type TestStep struct{}
 func (s *TestStep) Name() types.StepName { return types.StepTest }
 
 func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	defer func() {
+		if err := cleanupTemporaryDDEVProject(sctx); err != nil {
+			sctx.Log(fmt.Sprintf("warning: clean temporary DDEV project: %v", err))
+		}
+	}()
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}
