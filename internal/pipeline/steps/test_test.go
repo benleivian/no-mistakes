@@ -45,7 +45,7 @@ func TestTestStep_CleansOwnedTemporaryDDEVRegistrationAfterTestFailure(t *testin
 	if err := os.WriteFile(filepath.Join(binDir, "ddev"), []byte(`#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_DDEV_LOG"
 if [ "$1" = list ]; then cat "$FAKE_DDEV_LIST"; exit 0; fi
-if [ "$1" = stop ] && [ "$2" = --unlist ]; then exit 0; fi
+if [ "$1" = delete ] && [ "$2" = -Oy ]; then exit 0; fi
 exit 1
 `), 0o755); err != nil {
 		t.Fatal(err)
@@ -67,7 +67,7 @@ exit 1
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := strings.Fields(string(gotLog)), []string{"list", "--json-output", "stop", "--unlist", generated}; !slices.Equal(got, want) {
+	if got, want := strings.Fields(string(gotLog)), []string{"list", "--json-output", "delete", "-Oy", generated}; !slices.Equal(got, want) {
 		t.Fatalf("ddev commands = %q, want %q", got, want)
 	}
 	if _, err := os.Stat(dir); err != nil {

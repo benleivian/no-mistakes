@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -92,6 +95,50 @@ func TestRecoverOnStartup_DoesNotDeleteActiveRunWorktree(t *testing.T) {
 // for this root, RunWithOptions must fail before ever calling
 // RecoverStaleRuns, so a duplicate daemon can never mark a live daemon's
 // active runs as crashed.
+func TestCleanupOrphanWorktreesDeletesScopedDDEVProjectsBeforeRemoval(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	worktree := p.WorktreeDir("repo1", "run1")
+	external := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(worktree, ".ddev"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logFile := filepath.Join(t.TempDir(), "ddev.log")
+	projects := fmt.Sprintf(`[{"name":"owned-addon","approot":%q},{"name":"external","approot":%q}]`, worktree, external)
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "ddev"), []byte(`#!/bin/sh
+if [ "$1" = list ]; then printf '%s' "$FAKE_DDEV_PROJECTS"; exit 0; fi
+test -d "$PWD/.ddev" || exit 1
+printf '%s\n' "$*" >> "$FAKE_DDEV_LOG"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_DDEV_LOG", logFile)
+	t.Setenv("FAKE_DDEV_PROJECTS", projects)
+
+	cleanupOrphanWorktrees(d, p)
+
+	got, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "delete -Oy owned-addon"; strings.TrimSpace(string(got)) != want {
+		t.Fatalf("DDEV commands = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+		t.Fatalf("worktree should have been removed, stat err: %v", err)
+	}
+}
+
 func TestRunWithOptions_RequiresSingletonLockBeforeRecovery(t *testing.T) {
 	p := paths.WithRoot(t.TempDir())
 	if err := p.EnsureDirs(); err != nil {

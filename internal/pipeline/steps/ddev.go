@@ -49,10 +49,10 @@ func cleanupTemporaryDDEVProject(sctx *pipeline.StepContext) error {
 		if project.Name != name || !sameDDEVAppRoot(project.AppRoot, sctx.WorkDir) {
 			continue
 		}
-		cmd := stepCmdContext(ctx, sctx, "ddev", "stop", "--unlist", name)
+		cmd := stepCmdContext(ctx, sctx, "ddev", "delete", "-Oy", name)
 		shellenv.ConfigureShellCommand(cmd)
 		if err := shellenv.RunShellCommand(cmd); err != nil {
-			return fmt.Errorf("stop temporary DDEV project %q: %w", name, err)
+			return fmt.Errorf("delete temporary DDEV project %q: %w", name, err)
 		}
 		return nil
 	}
