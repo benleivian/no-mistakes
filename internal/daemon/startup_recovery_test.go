@@ -112,7 +112,7 @@ func TestCleanupOrphanWorktreesDeletesScopedDDEVProjectsBeforeRemoval(t *testing
 		t.Fatal(err)
 	}
 	logFile := filepath.Join(t.TempDir(), "ddev.log")
-	projects := fmt.Sprintf(`[{"name":"owned-addon","approot":%q},{"name":"external","approot":%q}]`, worktree, external)
+	projects := fmt.Sprintf(`{"level":"info","raw":[{"name":"owned-addon","approot":%q},{"name":"external","approot":%q}]}`, worktree, external)
 	binDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(binDir, "ddev"), []byte(`#!/bin/sh
 if [ "$1" = list ]; then printf '%s' "$FAKE_DDEV_PROJECTS"; exit 0; fi

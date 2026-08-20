@@ -2,7 +2,6 @@ package steps
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/ddev"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"gopkg.in/yaml.v3"
@@ -20,11 +20,6 @@ const ddevCleanupTimeout = 30 * time.Second
 
 type ddevConfig struct {
 	Name string `yaml:"name"`
-}
-
-type ddevProject struct {
-	Name    string `json:"name"`
-	AppRoot string `json:"approot"`
 }
 
 // cleanupTemporaryDDEVProject releases only the DDEV registration created for
@@ -85,15 +80,15 @@ func temporaryDDEVProjectName(sctx *pipeline.StepContext) (string, error) {
 	return name + suffix, nil
 }
 
-func listDDEVProjects(ctx context.Context, sctx *pipeline.StepContext) ([]ddevProject, error) {
+func listDDEVProjects(ctx context.Context, sctx *pipeline.StepContext) ([]ddev.Project, error) {
 	cmd := stepCmdContext(ctx, sctx, "ddev", "list", "--json-output")
 	shellenv.ConfigureShellCommand(cmd)
 	output, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
 		return nil, err
 	}
-	var projects []ddevProject
-	if err := json.Unmarshal(output, &projects); err != nil {
+	projects, err := ddev.ParseListOutput(output)
+	if err != nil {
 		return nil, fmt.Errorf("parse DDEV project list: %w", err)
 	}
 	return projects, nil

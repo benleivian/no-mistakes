@@ -16,9 +16,21 @@ import (
 
 const cleanupTimeout = 30 * time.Second
 
-type project struct {
+type Project struct {
 	Name    string `json:"name"`
 	AppRoot string `json:"approot"`
+}
+
+type listOutput struct {
+	Raw []Project `json:"raw"`
+}
+
+func ParseListOutput(output []byte) ([]Project, error) {
+	var result listOutput
+	if err := json.Unmarshal(output, &result); err != nil {
+		return nil, err
+	}
+	return result.Raw, nil
 }
 
 // Cleanup deletes DDEV projects whose app root is inside workDir. It is best
@@ -38,8 +50,8 @@ func Cleanup(workDir string) {
 		slog.Warn("failed to list DDEV projects for worktree cleanup", "path", workDir, "error", err)
 		return
 	}
-	var projects []project
-	if err := json.Unmarshal(output, &projects); err != nil {
+	projects, err := ParseListOutput(output)
+	if err != nil {
 		slog.Warn("failed to parse DDEV project list for worktree cleanup", "path", workDir, "error", err)
 		return
 	}

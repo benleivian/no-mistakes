@@ -38,7 +38,7 @@ func TestTestStep_CleansOwnedTemporaryDDEVRegistrationAfterTestFailure(t *testin
 
 	logFile := filepath.Join(t.TempDir(), "ddev.log")
 	listFile := filepath.Join(t.TempDir(), "ddev-list.json")
-	if err := os.WriteFile(listFile, []byte(fmt.Sprintf(`[{"name":%q,"approot":%q},{"name":"source-project","approot":%q}]`, generated, dir, t.TempDir())), 0o644); err != nil {
+	if err := os.WriteFile(listFile, []byte(fmt.Sprintf(`{"level":"info","raw":[{"name":%q,"approot":%q},{"name":"source-project","approot":%q}]}`, generated, dir, t.TempDir())), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	binDir := fakeCLIBinDir(t)
@@ -94,7 +94,7 @@ func TestTestStep_DoesNotUnlistAnUnregisteredDDEVProject(t *testing.T) {
 	binDir := fakeCLIBinDir(t)
 	if err := os.WriteFile(filepath.Join(binDir, "ddev"), []byte(`#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_DDEV_LOG"
-if [ "$1" = list ]; then echo '[]'; exit 0; fi
+if [ "$1" = list ]; then echo '{"level":"info","raw":[]}'; exit 0; fi
 exit 1
 `), 0o755); err != nil {
 		t.Fatal(err)
