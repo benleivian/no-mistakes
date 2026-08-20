@@ -14,7 +14,10 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
-const cleanupTimeout = 30 * time.Second
+var (
+	cleanupTimeout        = 10 * time.Second
+	cleanupCommandTimeout = 5 * time.Second
+)
 
 type Project struct {
 	Name    string `json:"name"`
@@ -37,12 +40,14 @@ func ParseListOutput(output []byte) ([]Project, error) {
 // effort: a missing DDEV binary or any cleanup failure never blocks deletion
 // of the worktree.
 func Cleanup(workDir string) {
-	listCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	listCtx, listCancel := context.WithTimeout(cleanupCtx, cleanupCommandTimeout)
 
 	cmd := exec.CommandContext(listCtx, "ddev", "list", "--json-output")
 	shellenv.ConfigureShellCommand(cmd)
 	output, err := shellenv.OutputShellCommand(cmd)
-	cancel()
+	listCancel()
 	if errors.Is(err, exec.ErrNotFound) {
 		return
 	}
@@ -59,12 +64,16 @@ func Cleanup(workDir string) {
 		if project.Name == "" || !appRootWithin(project.AppRoot, workDir) {
 			continue
 		}
-		deleteCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		if cleanupCtx.Err() != nil {
+			slog.Warn("DDEV worktree cleanup budget exhausted", "path", workDir, "project", project.Name)
+			continue
+		}
+		deleteCtx, deleteCancel := context.WithTimeout(cleanupCtx, cleanupCommandTimeout)
 		cmd := exec.CommandContext(deleteCtx, "ddev", "delete", "-Oy", project.Name)
 		cmd.Dir = workDir
 		shellenv.ConfigureShellCommand(cmd)
 		err := shellenv.RunShellCommand(cmd)
-		cancel()
+		deleteCancel()
 		if err != nil {
 			slog.Warn("failed to delete DDEV project during worktree cleanup", "path", workDir, "project", project.Name, "error", err)
 		}
