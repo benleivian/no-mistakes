@@ -37,12 +37,12 @@ func ParseListOutput(output []byte) ([]Project, error) {
 // effort: a missing DDEV binary or any cleanup failure never blocks deletion
 // of the worktree.
 func Cleanup(workDir string) {
-	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
-	defer cancel()
+	listCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 
-	cmd := exec.CommandContext(ctx, "ddev", "list", "--json-output")
+	cmd := exec.CommandContext(listCtx, "ddev", "list", "--json-output")
 	shellenv.ConfigureShellCommand(cmd)
 	output, err := shellenv.OutputShellCommand(cmd)
+	cancel()
 	if errors.Is(err, exec.ErrNotFound) {
 		return
 	}
@@ -59,10 +59,13 @@ func Cleanup(workDir string) {
 		if project.Name == "" || !appRootWithin(project.AppRoot, workDir) {
 			continue
 		}
-		cmd := exec.CommandContext(ctx, "ddev", "delete", "-Oy", project.Name)
+		deleteCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		cmd := exec.CommandContext(deleteCtx, "ddev", "delete", "-Oy", project.Name)
 		cmd.Dir = workDir
 		shellenv.ConfigureShellCommand(cmd)
-		if err := shellenv.RunShellCommand(cmd); err != nil {
+		err := shellenv.RunShellCommand(cmd)
+		cancel()
+		if err != nil {
 			slog.Warn("failed to delete DDEV project during worktree cleanup", "path", workDir, "project", project.Name, "error", err)
 		}
 	}
