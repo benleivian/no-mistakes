@@ -270,19 +270,12 @@ Start a new run only after abort confirms the terminal state; see the [abort com
 
 Symptom: `~/.no-mistakes/worktrees/<repoID>/<runID>/` sticks around after a run ends.
 
-The daemon removes worktrees at run completion, and also on daemon startup (crash recovery). If one is still there:
+See [scoped DDEV cleanup](/no-mistakes/concepts/daemon/#worktree-cleanup) for the automatic cleanup lifecycle and its startup-recovery exception. If a worktree is still there, remove any DDEV projects rooted in it before manually deleting the worktree:
 
 ```sh
 # From inside the repo the worktree belongs to:
 git worktree list
 git worktree remove --force <path>
-```
-
-Or let the daemon clean it on next startup:
-
-```sh
-no-mistakes daemon stop
-no-mistakes daemon start
 ```
 
 ## Reset everything

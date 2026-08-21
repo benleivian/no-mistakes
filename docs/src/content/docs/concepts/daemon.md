@@ -97,6 +97,12 @@ Each process is asked to exit first and only forcibly killed if it is still runn
 A process can still escape that tree by detaching itself into its own session, so when a run finishes the daemon also terminates anything still standing in that run's worktree before removing the directory.
 That sweep is scoped by working directory: it never touches a worktree whose run is still active, and it can never reach a process working outside `~/.no-mistakes/worktrees/`.
 
+### Worktree cleanup
+
+During run cleanup and gate ejection, before no-mistakes removes an isolated worktree, it runs `ddev delete -Oy <project>` for every registered DDEV project whose app root resolves inside that worktree. Cleanup is best-effort and runs while the worktree and its DDEV Compose files still exist, on normal run completion, setup failure or cancellation, recovered-run completion, and gate ejection. This removes project containers, volumes, networks, and add-on services created by project hooks. Startup orphan cleanup is the exception: it remains directory-only and never invokes DDEV.
+
+No-mistakes does not start DDEV itself. If `ddev` is unavailable or no registered project belongs to the worktree, cleanup is silent. A DDEV command failure is logged but never fails the run or prevents worktree removal, and projects whose app roots are outside the worktree are never selected.
+
 ## Concurrent push handling
 
 If you push to the same branch while a run is already active, the daemon:

@@ -38,20 +38,14 @@ func TestTestStep_CleansOwnedTemporaryDDEVRegistrationAfterTestFailure(t *testin
 
 	logFile := filepath.Join(t.TempDir(), "ddev.log")
 	listFile := filepath.Join(t.TempDir(), "ddev-list.json")
-	if err := os.WriteFile(listFile, []byte(fmt.Sprintf(`[{"name":%q,"approot":%q},{"name":"source-project","approot":%q}]`, generated, dir, t.TempDir())), 0o644); err != nil {
+	if err := os.WriteFile(listFile, []byte(fmt.Sprintf(`{"level":"info","raw":[{"name":%q,"approot":%q},{"name":"source-project","approot":%q}]}`, generated, dir, t.TempDir())), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	binDir := fakeCLIBinDir(t)
-	if err := os.WriteFile(filepath.Join(binDir, "ddev"), []byte(`#!/bin/sh
-printf '%s\n' "$*" >> "$FAKE_DDEV_LOG"
-if [ "$1" = list ]; then cat "$FAKE_DDEV_LIST"; exit 0; fi
-if [ "$1" = stop ] && [ "$2" = --unlist ]; then exit 0; fi
-exit 1
-`), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	linkTestBinary(t, binDir, "ddev")
 	sctx.Env = fakeCLIEnv(binDir, map[string]string{
-		"FAKE_DDEV_LOG":  logFile,
+		"FAKE_CLI_MODE":  "ddev",
+		"FAKE_CLI_LOG":   logFile,
 		"FAKE_DDEV_LIST": listFile,
 	})
 	sctx.Config.Commands.Test = "exit 1"
@@ -67,7 +61,7 @@ exit 1
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := strings.Fields(string(gotLog)), []string{"list", "--json-output", "stop", "--unlist", generated}; !slices.Equal(got, want) {
+	if got, want := strings.Fields(string(gotLog)), []string{"list", "--json-output", "delete", "-Oy", generated}; !slices.Equal(got, want) {
 		t.Fatalf("ddev commands = %q, want %q", got, want)
 	}
 	if _, err := os.Stat(dir); err != nil {
@@ -91,15 +85,17 @@ func TestTestStep_DoesNotUnlistAnUnregisteredDDEVProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	logFile := filepath.Join(t.TempDir(), "ddev.log")
-	binDir := fakeCLIBinDir(t)
-	if err := os.WriteFile(filepath.Join(binDir, "ddev"), []byte(`#!/bin/sh
-printf '%s\n' "$*" >> "$FAKE_DDEV_LOG"
-if [ "$1" = list ]; then echo '[]'; exit 0; fi
-exit 1
-`), 0o755); err != nil {
+	listFile := filepath.Join(t.TempDir(), "ddev-list.json")
+	if err := os.WriteFile(listFile, []byte(`{"level":"info","raw":[]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sctx.Env = fakeCLIEnv(binDir, map[string]string{"FAKE_DDEV_LOG": logFile})
+	binDir := fakeCLIBinDir(t)
+	linkTestBinary(t, binDir, "ddev")
+	sctx.Env = fakeCLIEnv(binDir, map[string]string{
+		"FAKE_CLI_MODE":  "ddev",
+		"FAKE_CLI_LOG":   logFile,
+		"FAKE_DDEV_LIST": listFile,
+	})
 
 	if _, err := (&TestStep{}).Execute(sctx); err != nil {
 		t.Fatal(err)

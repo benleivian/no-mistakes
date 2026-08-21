@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ddev"
 	"github.com/kunchenguid/no-mistakes/internal/gatecontext"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -313,6 +314,13 @@ func Eject(ctx context.Context, d *db.DB, p *paths.Paths, workDir string) (*db.R
 
 	// Delete worktrees for this repo.
 	repoWtDir := filepath.Join(p.WorktreesDir(), repo.ID)
+	if entries, err := os.ReadDir(repoWtDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				ddev.Cleanup(filepath.Join(repoWtDir, entry.Name()))
+			}
+		}
+	}
 	os.RemoveAll(repoWtDir)
 
 	// Delete repo record (cascades to runs + steps).
