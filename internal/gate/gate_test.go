@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -16,11 +17,62 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv("FAKE_DDEV_PROCESS") == "1" {
+		handleFakeDDEV()
+		return
+	}
 	// Agent harnesses inject git config (e.g. safe.bareRepository=explicit)
 	// via GIT_CONFIG_COUNT/KEY_n/VALUE_n; tests that need it re-set it with
 	// t.Setenv (issue #362).
 	os.Unsetenv("GIT_CONFIG_COUNT")
 	os.Exit(m.Run())
+}
+
+func handleFakeDDEV() {
+	args := os.Args[1:]
+	if len(args) == 2 && args[0] == "list" && args[1] == "--json-output" {
+		fmt.Printf(`{"raw":[{"name":"eject-addon","approot":%q}]}`, os.Getenv("FAKE_DDEV_APPROOT"))
+		return
+	}
+	if len(args) != 3 || args[0] != "delete" || args[1] != "-Oy" {
+		os.Exit(1)
+	}
+	if _, err := os.Stat(filepath.Join(".ddev")); err != nil {
+		os.Exit(17)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		os.Exit(1)
+	}
+	f, err := os.OpenFile(os.Getenv("FAKE_DDEV_LOG"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		os.Exit(1)
+	}
+	_, _ = fmt.Fprintf(f, "%s cwd=%s\n", strings.Join(args, " "), cwd)
+	_ = f.Close()
+	os.Exit(23)
+}
+
+func linkFakeExecutable(t *testing.T, binDir, name string) {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	dst := filepath.Join(binDir, name)
+	if err := os.Link(exe, dst); err == nil {
+		return
+	}
+	data, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestProvisionGateDoesNotStampUnsupportedHookIsolation(t *testing.T) {
@@ -992,15 +1044,9 @@ func TestEjectCleansUpWorktrees(t *testing.T) {
 	}
 	ddevLog := filepath.Join(t.TempDir(), "ddev.log")
 	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "ddev"), []byte(`#!/bin/sh
-if [ "$1" = list ]; then printf '{"raw":[{"name":"eject-addon","approot":"%s"}]}' "$FAKE_DDEV_APPROOT"; exit 0; fi
-test -d "$PWD/.ddev" || exit 17
-printf '%s cwd=%s\n' "$*" "$PWD" >> "$FAKE_DDEV_LOG"
-exit 23
-`), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	linkFakeExecutable(t, binDir, "ddev")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_DDEV_PROCESS", "1")
 	t.Setenv("FAKE_DDEV_APPROOT", wtDir)
 	t.Setenv("FAKE_DDEV_LOG", ddevLog)
 

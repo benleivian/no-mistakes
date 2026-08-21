@@ -18,7 +18,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/ddev"
 	"github.com/kunchenguid/no-mistakes/internal/gatecontext"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -496,7 +495,6 @@ func cleanupOrphanWorktrees(d *db.DB, p *paths.Paths) {
 				slog.Info("skipping worktree cleanup", "path", wtPath, "reason", reason)
 				continue
 			}
-			ddev.Cleanup(wtPath)
 			if err := git.WorktreeRemove(ctx, gateDir, wtPath); err != nil {
 				slog.Warn("git worktree remove failed, falling back to os.RemoveAll", "path", wtPath, "error", err)
 				if err := os.RemoveAll(wtPath); err != nil {

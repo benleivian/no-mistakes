@@ -99,7 +99,7 @@ That sweep is scoped by working directory: it never touches a worktree whose run
 
 ### Worktree cleanup
 
-Before no-mistakes removes an isolated worktree, it best-effort deletes every registered DDEV project whose app root resolves inside that worktree. Cleanup runs while the worktree and its DDEV Compose files still exist, on normal run completion, setup failure or cancellation, recovered-run completion, startup orphan cleanup, and gate ejection. This removes project containers, volumes, networks, and add-on services created by project hooks.
+Before no-mistakes removes an isolated worktree, it best-effort deletes every registered DDEV project whose app root resolves inside that worktree. Cleanup runs while the worktree and its DDEV Compose files still exist, on normal run completion, setup failure or cancellation, recovered-run completion, and gate ejection. This removes project containers, volumes, networks, and add-on services created by project hooks.
 
 No-mistakes does not start DDEV itself. If `ddev` is unavailable or no registered project belongs to the worktree, cleanup is silent. A DDEV command failure is logged but never fails the run or prevents worktree removal, and projects whose app roots are outside the worktree are never selected.
 
@@ -126,7 +126,7 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
 - Terminates processes a crashed daemon left running in worktrees no run owns any more, using the same working-directory scoping as run cleanup plus a ten-minute age floor so a run starting concurrently with startup is never mistaken for a leak
-- Removes orphaned worktree directories via `git worktree remove --force` - but never one whose run is still `pending` or `running`; only leftovers from terminal runs or directories with no matching run record are removed. The same [scoped DDEV cleanup](#worktree-cleanup) runs before removal
+- Removes orphaned worktree directories via `git worktree remove --force` - but never one whose run is still `pending` or `running`; only leftovers from terminal runs or directories with no matching run record are removed
 - Migrates gates named by authoritative repository records, plus legacy directories with the strict `<repoID>.git` shape. Before changing an unstamped candidate, it validates that the directory is a bare repository without relying on the current directory or ancestor Git discovery; unrelated and malformed directories are rejected without hook or Git mutation
 - For a validated legacy gate, installs or refreshes the no-mistakes-managed pre-receive admission and post-receive notification hooks, preserving an existing custom pre-receive hook behind the admission wrapper, then enables push-option support and reapplies per-worktree hook-path isolation
 - Records a content-versioned gate configuration stamp only after the whole migration succeeds. Normal restarts check current stamped gates from the filesystem without rerunning the mutating Git commands

@@ -68,9 +68,26 @@ func handleFakeCLI(mode string) {
 		fakeCIGlabSequenceHandler(args)
 	case "ci-gh-reconcile":
 		fakeCIGHReconcileHandler(args)
+	case "ddev":
+		fakeDDEVHandler(args)
 	default:
 		os.Exit(1)
 	}
+}
+
+func fakeDDEVHandler(args []string) {
+	if len(args) == 2 && args[0] == "list" && args[1] == "--json-output" {
+		data, err := os.ReadFile(os.Getenv("FAKE_DDEV_LIST"))
+		if err != nil {
+			os.Exit(1)
+		}
+		_, _ = os.Stdout.Write(data)
+		return
+	}
+	if len(args) == 3 && args[0] == "delete" && args[1] == "-Oy" {
+		return
+	}
+	os.Exit(1)
 }
 
 func logFakeCLIStdinBody(args []string, logFile string) {

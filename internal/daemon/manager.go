@@ -845,6 +845,15 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 		trackStartFailure("create_worktree")
 		return "", fmt.Errorf("create worktree: %w", err)
 	}
+	bgOwnsWorktree := false
+	defer func() {
+		if !bgOwnsWorktree {
+			ddev.Cleanup(wtDir)
+			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
+				slog.Warn("failed to remove worktree during setup cleanup", "path", wtDir, "error", rmErr)
+			}
+		}
+	}()
 	if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, wtDir); err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("configure worktree git identity: %s", err))
 		trackStartFailure("configure_worktree_identity")
@@ -870,18 +879,6 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 			trustedSHA = sha
 		}
 	}
-
-	// Track whether the background goroutine takes ownership of worktree cleanup.
-	// If setup fails before the goroutine launches, we must clean up here.
-	bgOwnsWorktree := false
-	defer func() {
-		if !bgOwnsWorktree {
-			ddev.Cleanup(wtDir)
-			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
-				slog.Warn("failed to remove worktree during setup cleanup", "path", wtDir, "error", rmErr)
-			}
-		}
-	}()
 
 	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
 	if err != nil {
