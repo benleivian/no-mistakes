@@ -99,7 +99,7 @@ That sweep is scoped by working directory: it never touches a worktree whose run
 
 ### Worktree cleanup
 
-Before no-mistakes removes an isolated worktree, it best-effort deletes every registered DDEV project whose app root resolves inside that worktree. Cleanup runs while the worktree and its DDEV Compose files still exist, on normal run completion, setup failure or cancellation, recovered-run completion, and gate ejection. This removes project containers, volumes, networks, and add-on services created by project hooks.
+During run cleanup and gate ejection, before no-mistakes removes an isolated worktree, it runs `ddev delete -Oy <project>` for every registered DDEV project whose app root resolves inside that worktree. Cleanup is best-effort and runs while the worktree and its DDEV Compose files still exist, on normal run completion, setup failure or cancellation, recovered-run completion, and gate ejection. This removes project containers, volumes, networks, and add-on services created by project hooks. Startup orphan cleanup is the exception: it remains directory-only and never invokes DDEV.
 
 No-mistakes does not start DDEV itself. If `ddev` is unavailable or no registered project belongs to the worktree, cleanup is silent. A DDEV command failure is logged but never fails the run or prevents worktree removal, and projects whose app roots are outside the worktree are never selected.
 

@@ -33,6 +33,7 @@ func TestCleanupDeletesOnlyScopedProjectsBeforeWorkspaceRemoval(t *testing.T) {
 	if want := "delete -Oy owned-addon"; strings.TrimSpace(string(got)) != want {
 		t.Fatalf("DDEV commands = %q, want %q", got, want)
 	}
+	t.Logf("scoped cleanup: %s; external project at %s was not deleted", strings.TrimSpace(string(got)), external)
 }
 
 func TestMain(m *testing.M) {

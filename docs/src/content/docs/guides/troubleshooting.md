@@ -270,7 +270,7 @@ Start a new run only after abort confirms the terminal state; see the [abort com
 
 Symptom: `~/.no-mistakes/worktrees/<repoID>/<runID>/` sticks around after a run ends.
 
-The daemon applies [scoped DDEV cleanup](/no-mistakes/concepts/daemon/#worktree-cleanup) before removing worktrees during run cleanup. Startup orphan recovery removes directories without invoking DDEV. If a worktree is still there, remove any DDEV projects rooted in it before manually deleting the worktree:
+See [scoped DDEV cleanup](/no-mistakes/concepts/daemon/#worktree-cleanup) for the automatic cleanup lifecycle and its startup-recovery exception. If a worktree is still there, remove any DDEV projects rooted in it before manually deleting the worktree:
 
 ```sh
 # From inside the repo the worktree belongs to:

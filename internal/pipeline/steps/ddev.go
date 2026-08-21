@@ -22,8 +22,8 @@ type ddevConfig struct {
 	Name string `yaml:"name"`
 }
 
-// cleanupTemporaryDDEVProject releases only the DDEV registration created for
-// this run's isolated worktree. It deliberately leaves the worktree intact:
+// cleanupTemporaryDDEVProject deletes only the matching temporary DDEV project
+// for this run's isolated worktree. It deliberately leaves the worktree intact:
 // later review, CI, and approval still need it.
 func cleanupTemporaryDDEVProject(sctx *pipeline.StepContext) error {
 	name, err := temporaryDDEVProjectName(sctx)
