@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
@@ -73,6 +74,25 @@ func linkFakeExecutable(t *testing.T, binDir, name string) {
 	if err := os.WriteFile(dst, data, 0o755); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// Unlike t.TempDir, cleanup tolerates transient locks on recently executed
+// binaries on Windows.
+func fakeDDEVBinDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "fake-ddev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for i := 0; i < 10; i++ {
+			if err := os.RemoveAll(dir); err == nil {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	})
+	return dir
 }
 
 func TestProvisionGateDoesNotStampUnsupportedHookIsolation(t *testing.T) {
@@ -1043,7 +1063,7 @@ func TestEjectCleansUpWorktrees(t *testing.T) {
 		t.Fatalf("create worktree dir: %v", err)
 	}
 	ddevLog := filepath.Join(t.TempDir(), "ddev.log")
-	binDir := t.TempDir()
+	binDir := fakeDDEVBinDir(t)
 	linkFakeExecutable(t, binDir, "ddev")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("FAKE_DDEV_PROCESS", "1")

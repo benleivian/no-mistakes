@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCleanupDeletesOnlyScopedProjectsBeforeWorkspaceRemoval(t *testing.T) {
@@ -17,7 +18,7 @@ func TestCleanupDeletesOnlyScopedProjectsBeforeWorkspaceRemoval(t *testing.T) {
 	}
 	logFile := filepath.Join(t.TempDir(), "ddev.log")
 	projects := fmt.Sprintf(`{"raw":[{"name":"owned-addon","approot":%q},{"name":"external","approot":%q}]}`, workDir, external)
-	binDir := t.TempDir()
+	binDir := fakeCLIBinDir(t)
 	linkFakeExecutable(t, binDir, "ddev")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("FAKE_DDEV_PROCESS", "1")
@@ -34,6 +35,25 @@ func TestCleanupDeletesOnlyScopedProjectsBeforeWorkspaceRemoval(t *testing.T) {
 		t.Fatalf("DDEV commands = %q, want %q", got, want)
 	}
 	t.Logf("scoped cleanup: %s; external project at %s was not deleted", strings.TrimSpace(string(got)), external)
+}
+
+// Unlike t.TempDir, cleanup tolerates transient locks on recently executed
+// binaries on Windows.
+func fakeCLIBinDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "fake-ddev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for i := 0; i < 10; i++ {
+			if err := os.RemoveAll(dir); err == nil {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	})
+	return dir
 }
 
 func TestMain(m *testing.M) {
