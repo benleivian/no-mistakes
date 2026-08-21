@@ -987,9 +987,22 @@ func TestEjectCleansUpWorktrees(t *testing.T) {
 
 	// Create a fake worktree directory to verify cleanup.
 	wtDir := p.WorktreeDir(repo.ID, "fake-run-id")
-	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(wtDir, ".ddev"), 0o755); err != nil {
 		t.Fatalf("create worktree dir: %v", err)
 	}
+	ddevLog := filepath.Join(t.TempDir(), "ddev.log")
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "ddev"), []byte(`#!/bin/sh
+if [ "$1" = list ]; then printf '{"raw":[{"name":"eject-addon","approot":"%s"}]}' "$FAKE_DDEV_APPROOT"; exit 0; fi
+test -d "$PWD/.ddev" || exit 17
+printf '%s cwd=%s\n' "$*" "$PWD" >> "$FAKE_DDEV_LOG"
+exit 23
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_DDEV_APPROOT", wtDir)
+	t.Setenv("FAKE_DDEV_LOG", ddevLog)
 
 	if _, err := Eject(ctx, d, p, workDir); err != nil {
 		t.Fatalf("eject: %v", err)
@@ -1000,6 +1013,15 @@ func TestEjectCleansUpWorktrees(t *testing.T) {
 	if fileExists(repoWtDir) {
 		t.Error("expected worktree directory to be cleaned up")
 	}
+	got, err := os.ReadFile(ddevLog)
+	if err != nil {
+		t.Fatalf("read DDEV cleanup log: %v", err)
+	}
+	want := fmt.Sprintf("delete -Oy eject-addon cwd=%s", wtDir)
+	if strings.TrimSpace(string(got)) != want {
+		t.Fatalf("DDEV cleanup commands = %q, want %q", got, want)
+	}
+	t.Logf("ejection lifecycle: %s failed non-fatally; workspace removed", strings.TrimSpace(string(got)))
 }
 
 func TestEjectNotInitialized(t *testing.T) {

@@ -42,3 +42,22 @@ printf '%s\n' "$*" >> "$FAKE_DDEV_LOG"
 		t.Fatalf("DDEV commands = %q, want %q", got, want)
 	}
 }
+
+func TestCleanupWithoutDDEVLeavesWorkspaceUntouched(t *testing.T) {
+	workDir := t.TempDir()
+	marker := filepath.Join(workDir, "keep")
+	if err := os.WriteFile(marker, []byte("unchanged"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+
+	Cleanup(workDir)
+
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("workspace marker was disturbed without DDEV: %v", err)
+	}
+	if string(got) != "unchanged" {
+		t.Fatalf("workspace marker = %q, want unchanged", got)
+	}
+}

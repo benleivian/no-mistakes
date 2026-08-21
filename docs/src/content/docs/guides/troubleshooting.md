@@ -270,7 +270,7 @@ Start a new run only after abort confirms the terminal state; see the [abort com
 
 Symptom: `~/.no-mistakes/worktrees/<repoID>/<runID>/` sticks around after a run ends.
 
-The daemon removes worktrees at run completion, and also on daemon startup (crash recovery). If one is still there:
+The daemon removes worktrees at run completion and on daemon startup (crash recovery), including [scoped DDEV cleanup](/no-mistakes/concepts/daemon/#worktree-cleanup). If one is still there, remove any DDEV projects rooted in it before manually deleting the worktree:
 
 ```sh
 # From inside the repo the worktree belongs to:

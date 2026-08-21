@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -693,6 +694,23 @@ func TestRecoverCleansUpOrphanedWorktrees(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.WriteFile(filepath.Join(orphanDir, "test.txt"), []byte("orphan"), 0o644)
+	if err := os.MkdirAll(filepath.Join(orphanDir, ".ddev"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	externalDir := t.TempDir()
+	ddevLog := filepath.Join(t.TempDir(), "ddev.log")
+	binDir := t.TempDir()
+	projects := fmt.Sprintf(`{"raw":[{"name":"orphan-addon","approot":%q},{"name":"external","approot":%q}]}`, orphanDir, externalDir)
+	if err := os.WriteFile(filepath.Join(binDir, "ddev"), []byte(`#!/bin/sh
+if [ "$1" = list ]; then printf '%s' "$FAKE_DDEV_PROJECTS"; exit 0; fi
+test -d "$PWD/.ddev" || exit 17
+printf '%s cwd=%s\n' "$*" "$PWD" >> "$FAKE_DDEV_LOG"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_DDEV_PROJECTS", projects)
+	t.Setenv("FAKE_DDEV_LOG", ddevLog)
 
 	d, err := db.Open(p.DB())
 	if err != nil {
@@ -732,6 +750,15 @@ func TestRecoverCleansUpOrphanedWorktrees(t *testing.T) {
 	if _, err := os.Stat(orphanDir); !os.IsNotExist(err) {
 		t.Errorf("orphaned worktree dir still exists: %s", orphanDir)
 	}
+	got, err := os.ReadFile(ddevLog)
+	if err != nil {
+		t.Fatalf("read DDEV lifecycle log: %v", err)
+	}
+	want := fmt.Sprintf("delete -Oy orphan-addon cwd=%s", orphanDir)
+	if strings.TrimSpace(string(got)) != want {
+		t.Fatalf("DDEV lifecycle commands = %q, want %q", got, want)
+	}
+	t.Logf("startup lifecycle: %s; workspace removed; external project untouched", strings.TrimSpace(string(got)))
 }
 
 // TestRecoverIsolatesGateRepoHooksPath covers issue #122 for existing
