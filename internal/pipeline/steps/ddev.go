@@ -44,7 +44,7 @@ func cleanupTemporaryDDEVProject(sctx *pipeline.StepContext) error {
 		if project.Name != name || !sameDDEVAppRoot(project.AppRoot, sctx.WorkDir) {
 			continue
 		}
-		cmd := stepCmdContext(ctx, sctx, "ddev", "delete", "-Oy", name)
+		cmd := stepCmdContext(sctx, ctx, "ddev", "delete", "-Oy", name)
 		shellenv.ConfigureShellCommand(cmd)
 		if err := shellenv.RunShellCommand(cmd); err != nil {
 			return fmt.Errorf("delete temporary DDEV project %q: %w", name, err)
@@ -81,7 +81,7 @@ func temporaryDDEVProjectName(sctx *pipeline.StepContext) (string, error) {
 }
 
 func listDDEVProjects(ctx context.Context, sctx *pipeline.StepContext) ([]ddev.Project, error) {
-	cmd := stepCmdContext(ctx, sctx, "ddev", "list", "--json-output")
+	cmd := stepCmdContext(sctx, ctx, "ddev", "list", "--json-output")
 	shellenv.ConfigureShellCommand(cmd)
 	output, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {

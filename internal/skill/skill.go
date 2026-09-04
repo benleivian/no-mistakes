@@ -237,11 +237,11 @@ Before any post-pipeline local commit or fresh run, read the structured ` + "`br
 Only when its ` + "`next_action.code`" + ` is ` + "`sync`" + `, run ` + "`no-mistakes axi sync`" + ` first.
 That guarded sync may be a strict fast-forward or a content-equivalent diverged advance that anchors the pre-sync head before moving the branch with reset semantics; genuine divergence stays blocked.
 If it reports ` + "`next_action.code`" + ` is ` + "`continue_active_run`" + `, the pipeline still owns the branch: run the reported command, keep driving the active run, and do not make local follow-up commits.
-When ` + "`next_action.code`" + ` is ` + "`recover_custody`" + `, a terminal run left unpublished pipeline commits preserved in the local gate: run ` + "`no-mistakes axi sync --recover`" + ` to return custody and take the preserved head, or ` + "`no-mistakes rerun`" + ` to resume validating it instead.
-Recovery takes that head by fast-forward, or by adopting a diverged preserved head proven to carry every local change - the ordinary result of the pipeline rebasing your commits onto a newer base - after anchoring your pre-recovery head under ` + "`refs/no-mistakes/recover-local/<run>`" + `.
-That proof is deliberately narrow, so a rebase whose fix rounds also rewrote your own lines refuses instead of being adopted: when nothing can tell a deliberate pipeline fix from a dropped change, the decision is yours.
+When ` + "`next_action.code`" + ` is ` + "`recover_custody`" + `, run its exact ` + "`next_action.command`" + ` rather than reconstructing one. That is ` + "`no-mistakes axi sync --recover`" + ` to take a still-available preserved pipeline head, or ` + "`no-mistakes axi sync --recover --keep-local`" + ` in two keep-local cases: when an accessible gate confirms the verified preserved head is missing and you are explicitly discarding those unpublished commits, or when a bound archive proves divergent later work remains preserved while recovery keeps the branch at the exact reported required head and never selects, merges, or replays the archive. Do not substitute plain ` + "`--recover`" + ` or ` + "`rerun`" + ` for a reported keep-local action. ` + "`no-mistakes rerun`" + ` resumes validating a still-available ordinary preserved head instead.
+Ordinary recovery takes that head by fast-forward, or by adopting a diverged preserved head proven to carry every local change - the ordinary result of the pipeline rebasing your commits onto a newer base - after anchoring your pre-recovery head under ` + "`refs/no-mistakes/recover-local/<run>`" + `.
+The ordinary containment proof is deliberately narrow, so a rebase whose fix rounds also rewrote your own lines refuses instead of being adopted: when nothing can tell a deliberate pipeline fix from a dropped change, the decision is yours.
 A ` + "`branch_sync.state`" + ` of ` + "`user_owned`" + ` means the run went terminal before changing the submitted head and cancellation released the branch: the exact branch and head are yours and immediately usable for whichever delivery path is authorized - no sync action is needed, and a repeated ` + "`--recover`" + ` there is a harmless no-op.
-A dirty worktree, or divergence that cannot be proven contained, makes the recovery refuse with explicit choices; ` + "`--keep-local`" + ` keeps your current head while the preserved commits stay anchored under ` + "`refs/no-mistakes/recover/<run>`" + `.
+A dirty worktree, or divergence that cannot be proven contained, makes the recovery refuse with explicit choices; ` + "`--keep-local`" + ` keeps your current head while the preserved commits stay anchored under ` + "`refs/no-mistakes/recover/<run>`" + `. The same flag is the recovery when an accessible gate confirms that the verified preserved head is missing and recovery refs are compatible: it returns custody at the current local head without requiring that object.
 If synchronization is blocked, process that structured state instead of improvising reset, stash, merge, rebase, force, or branch replacement.
 After synchronization, commit the follow-up on top and re-run ` + "`no-mistakes axi run --intent \"...\"`" + ` with the original user intent.
 This preserves every prior gate-fix commit regardless of its configured subject.
@@ -255,8 +255,9 @@ Never treat "no CI checks reported" alone as green.
 Because that monitor stays live, a PR that falls behind the default branch or
 hits a merge conflict after checks pass - commonly because another PR merged
 first - needs **no command from you**: never hand-rebase. When the CI monitor
-sees an actual conflict it **rebases onto the base, resolves it, and re-pushes
-the branch itself**; a PR that is merely behind but still clean needs nothing
+sees an actual conflict it **rebases onto the base, resolves it, revalidates from Review
+because rebasing cannot prove continuity with the reviewed head, and re-pushes
+the branch through Push**; a PR that is merely behind but still clean needs nothing
 either, since the platform merges it. The one exception is when that monitor is
 no longer running - the PR was closed, the run was aborted or superseded, it
 idle-timed-out, or its auto-fix attempts were exhausted - in which case recover
@@ -317,7 +318,8 @@ no-mistakes axi abort --run <id>   # cancel a specific run by id (works outside 
 ## Reading the output
 
 - Output is TOON: ` + "`key: value`" + ` pairs, ` + "`name[N]{cols}:`" + ` tables, and ` + "`help[N]:`" + ` hints.
-- A non-terminal run object may include ` + "`awaiting_agent: parked <duration>`" + ` immediately after ` + "`status`" + `; that means the run is parked at a gate awaiting your ` + "`axi respond`" + `.
+- ` + "`axi status`" + ` is scoped to your current branch when ` + "`--run`" + ` is omitted: with a known current branch, an implicitly resolved ` + "`run:`" + ` is this branch's. A run under ` + "`other_branch_run:`" + ` is one you named with ` + "`--run <id>`" + ` that belongs to another branch - never read its status or outcome as your own work. An explicit ` + "`--run <id>`" + ` rendered under ` + "`run:`" + ` while the current branch is unknown (detached ` + "`HEAD`" + ` or a branch-lookup failure) encodes no branch relationship. In a successful status response, no run object at all means this branch has no run yet, whatever the recent-runs table lists; an ` + "`error:`" + ` response proves nothing about run ownership, so act on the error instead of concluding the branch is idle.
+- A non-terminal run object may include ` + "`awaiting_agent: parked <duration>`" + ` immediately after ` + "`status`" + `; that means the run is parked at a gate. Only an implicitly resolved current-branch gate offers ` + "`axi respond`" + `; an explicit ` + "`--run <id>`" + ` status is inspection-only even when its branch matches, because the branch may have a newer active run. Follow the response's ` + "`help`" + `.
 - A run object with a ` + "`running`" + ` or ` + "`fixing`" + ` step may include an ` + "`active_steps`" + ` table. Use it to see the active duration, latest activity, native agent PID, and current execution or fix round.
 - The ` + "`help`" + ` list at the bottom of most responses tells you the next commands to run.
 - Errors are printed as ` + "`error: ...`" + ` on stdout with a ` + "`help`" + ` list; act on the suggestion.
