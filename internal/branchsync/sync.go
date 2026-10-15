@@ -1293,7 +1293,7 @@ func preservedContainsLocalWork(ctx context.Context, dir, local, preserved strin
 	if err != nil || base == "" {
 		return false
 	}
-	return mergeTreePreservesFinalHead(ctx, dir, local, preserved)
+	return mergeTreePreservesFinalHead(ctx, dir, base, local, preserved)
 }
 
 func reviewedHeadProvesEquivalentTarget(ctx context.Context, dir, local, reviewed, target string) bool {
@@ -2038,7 +2038,7 @@ func equivalentDivergence(ctx context.Context, dir, local, pushed, base string) 
 	if err != nil {
 		return false
 	}
-	return mergeTreePreservesFinalHead(ctx, dir, local, pushed)
+	return mergeTreePreservesFinalHead(ctx, dir, base, local, pushed)
 }
 
 func usableEquivalenceBase(ctx context.Context, dir, local, pushed, base string) string {
@@ -2063,11 +2063,9 @@ func revList(ctx context.Context, dir string, args ...string) ([]string, error) 
 	return strings.Fields(out), nil
 }
 
-// mergeTreePreservesFinalHead asks Git to merge the two heads from their common
-// base and confirms the result is already the pushed tree. --write-tree has
-// selected the merge base itself since Git 2.38; passing --merge-base is newer
-// and fails on Apple's Git 2.39, so do not add it here.
-func mergeTreePreservesFinalHead(ctx context.Context, dir, local, pushed string) bool {
+// Fork: --merge-base needs Git 2.40 and fails on Apple Git 2.39, so base is
+// unused and --write-tree picks the merge base itself (Git 2.38+). See FORK.md.
+func mergeTreePreservesFinalHead(ctx context.Context, dir, _, local, pushed string) bool {
 	mergedTree, err := git.Run(ctx, dir, "merge-tree", "--write-tree", pushed, local)
 	if err != nil {
 		return false

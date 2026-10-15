@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/ddev"
 	"github.com/kunchenguid/no-mistakes/internal/gatecontext"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -391,21 +390,9 @@ func removeRepoWorktrees(d *db.DB, p *paths.Paths, repo *db.Repo) {
 	cleanupDDEVWorktrees(defaultDir)
 	os.RemoveAll(defaultDir)
 	for _, path := range recorded {
-		ddev.Cleanup(path)
+		cleanupDDEVWorktree(path)
 		if err := os.RemoveAll(path); err != nil {
 			slog.Warn("failed to remove run worktree during eject", "path", path, "error", err)
-		}
-	}
-}
-
-func cleanupDDEVWorktrees(dir string) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			ddev.Cleanup(filepath.Join(dir, entry.Name()))
 		}
 	}
 }

@@ -1,4 +1,5 @@
 // Package ddev cleans up DDEV projects registered for disposable worktrees.
+// It is fork-only; see FORK.md.
 package ddev
 
 import (
