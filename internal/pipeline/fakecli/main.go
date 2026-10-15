@@ -15,14 +15,35 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+
+	"github.com/kunchenguid/no-mistakes/internal/scm/plugin/fakeplugin"
 )
 
+// Logging and stateful PR readback consume the same command stdin, not two
+// independent streams. Each helper subprocess represents exactly one command.
+var readFakeBody = sync.OnceValues(func() ([]byte, error) { return io.ReadAll(os.Stdin) })
+
 func main() {
+	// The fake provider plugin is selected by executable name, not by
+	// FAKE_CLI_MODE: that variable is shared by every fake gh/git in the same
+	// step environment.
+	if isFakeProviderPlugin(os.Args[0]) {
+		os.Exit(fakeplugin.Main(os.Args[1:], os.Stdin, os.Stdout, os.Getenv(fakeplugin.EnvState), os.Getenv(fakeplugin.EnvLog)))
+	}
 	mode := os.Getenv("FAKE_CLI_MODE")
 	if mode == "" {
 		os.Exit(1)
 	}
 	handleFakeCLI(mode)
+}
+
+// isFakeProviderPlugin ignores the extension and its case: Windows resolves
+// a PATH lookup through PATHEXT, which yields an upper-case ".EXE".
+func isFakeProviderPlugin(arg0 string) bool {
+	base := filepath.Base(arg0)
+	base = strings.TrimSuffix(base, filepath.Ext(base))
+	return strings.EqualFold(base, fakeplugin.ExecutableName)
 }
 
 func handleFakeCLI(mode string) {
@@ -49,12 +70,18 @@ func handleFakeCLI(mode string) {
 		fakeGitPassthroughHandler(args)
 	case "git-move-head-passthrough":
 		fakeGitMoveHeadPassthroughHandler(args)
+	case "git-intervening-push-passthrough":
+		fakeGitInterveningPushPassthroughHandler(args)
 	case "git-reset-after-commit-passthrough":
 		fakeGitResetAfterCommitPassthroughHandler(args)
 	case "git-require-noninteractive-env":
 		fakeGitRequireNonInteractiveEnvHandler(args)
 	case "git-status-error":
 		fakeGitStatusErrorHandler(args)
+	case "git-stale-dirty-status":
+		fakeGitStaleDirtyStatusHandler(args)
+	case "git-commit-error":
+		fakeGitCommitErrorHandler(args)
 	case "git-remote-error":
 		fakeGitRemoteErrorHandler(args)
 	case "ci-gh":
@@ -71,31 +98,27 @@ func handleFakeCLI(mode string) {
 		fakeCIGHReconcileHandler(args)
 	case "ddev":
 		fakeDDEVHandler(args)
+	case "ci-gh-with-intervening-push":
+		// A single step invocation can need both a faked gh (for the PR
+		// attestation write) and a faked git (to inject a push-time race) in
+		// the same sctx.Env, so this dispatches on the binary name rather
+		// than a second, mutually exclusive FAKE_CLI_MODE.
+		binaryName := filepath.Base(os.Args[0])
+		if strings.TrimSuffix(binaryName, filepath.Ext(binaryName)) == "git" {
+			fakeGitInterveningPushPassthroughHandler(args)
+		} else {
+			fakeCIGHHandler(args)
+		}
 	default:
 		os.Exit(1)
 	}
-}
-
-func fakeDDEVHandler(args []string) {
-	if len(args) == 2 && args[0] == "list" && args[1] == "--json-output" {
-		data, err := os.ReadFile(os.Getenv("FAKE_DDEV_LIST"))
-		if err != nil {
-			os.Exit(1)
-		}
-		_, _ = os.Stdout.Write(data)
-		return
-	}
-	if len(args) == 3 && args[0] == "delete" && args[1] == "-Oy" {
-		return
-	}
-	os.Exit(1)
 }
 
 func logFakeCLIStdinBody(args []string, logFile string) {
 	if logFile == "" || !argsUseStdinBodyFile(args) {
 		return
 	}
-	body, err := io.ReadAll(os.Stdin)
+	body, err := readFakeBody()
 	if err != nil {
 		return
 	}
@@ -130,6 +153,7 @@ func fakeRecordSuccessHandler() {
 }
 
 func fakeGHHandler(args []string) {
+	fakeGHHandlePRContentCommands(args, strings.Join(args, " "))
 	prURL := os.Getenv("FAKE_CLI_PR_URL")
 	prBase := os.Getenv("FAKE_CLI_PR_BASE")
 	prListJSON, hasPRListJSON := os.LookupEnv("FAKE_CLI_PR_LIST_JSON")
@@ -175,6 +199,10 @@ func fakeGHHandler(args []string) {
 		os.Exit(0)
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "create" {
+		if os.Getenv("FAKE_CLI_PR_CREATE_EMPTY") == "1" {
+			os.Exit(0)
+		}
+		fakeGHStorePRBody(args)
 		fmt.Println("https://github.com/test/repo/pull/99")
 		os.Exit(0)
 	}
@@ -188,6 +216,23 @@ func fakeGitStatusErrorHandler(args []string) {
 		os.Exit(1)
 	}
 	fakeGitForward(args, realGit)
+}
+
+func fakeGitStaleDirtyStatusHandler(args []string) {
+	realGit := os.Getenv("FAKE_CLI_REAL_GIT")
+	if len(args) >= 2 && args[0] == "status" && args[1] == "--porcelain" {
+		fmt.Println(" M feature.txt")
+		os.Exit(0)
+	}
+	fakeGitForward(args, realGit)
+}
+
+func fakeGitCommitErrorHandler(args []string) {
+	if len(args) > 0 && args[0] == "commit" {
+		fmt.Fprintln(os.Stderr, "intentional commit failure")
+		os.Exit(1)
+	}
+	fakeGitForward(args, os.Getenv("FAKE_CLI_REAL_GIT"))
 }
 
 func fakeGitPassthroughHandler(args []string) {
@@ -209,6 +254,34 @@ func fakeGitMoveHeadPassthroughHandler(args []string) {
 		if err := cmd.Run(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
+		}
+	}
+	fakeGitForward(args, realGit)
+}
+
+// fakeGitInterveningPushPassthroughHandler models a genuine push-time race:
+// right before forwarding the pipeline's own push, it pushes an
+// already-prepared interloper commit to the same remote ref from a second
+// clone, so the pipeline's real force-with-lease push - resolved against the
+// remote state as it was at decision time, moments earlier - is rejected by
+// git's own lease check exactly as it would be against a real concurrent
+// push. FAKE_CLI_INTERLOPER_DIR is the second clone (with the interloper
+// commit already committed but not yet pushed); FAKE_CLI_INTERLOPER_REMOTE
+// and FAKE_CLI_INTERLOPER_REF name where to push it.
+func fakeGitInterveningPushPassthroughHandler(args []string) {
+	realGit := os.Getenv("FAKE_CLI_REAL_GIT")
+	if fakeGitSubcommand(args) == "push" {
+		interloperDir := os.Getenv("FAKE_CLI_INTERLOPER_DIR")
+		interloperRemote := os.Getenv("FAKE_CLI_INTERLOPER_REMOTE")
+		interloperRef := os.Getenv("FAKE_CLI_INTERLOPER_REF")
+		if interloperDir != "" && interloperRemote != "" && interloperRef != "" {
+			push := exec.Command(realGit, "-C", interloperDir, "push", interloperRemote, interloperRef)
+			push.Stdout = io.Discard
+			push.Stderr = os.Stderr
+			if err := push.Run(); err != nil {
+				fmt.Fprintln(os.Stderr, "interloper push failed:", err)
+				os.Exit(1)
+			}
 		}
 	}
 	fakeGitForward(args, realGit)
@@ -300,6 +373,24 @@ func fakeGitRemoteErrorHandler(args []string) {
 	fakeGitForward(args, realGit)
 }
 
+func fakePRHeadSHA() string {
+	configured := os.Getenv("FAKE_CLI_PR_HEAD_SHA")
+	if os.Getenv("FAKE_CLI_HEAD_FROM_WORKTREE") != "1" || configured != "deadbeef" {
+		return configured
+	}
+	realGit := os.Getenv("FAKE_CLI_REAL_GIT")
+	if realGit == "" {
+		fmt.Fprintln(os.Stderr, "missing FAKE_CLI_REAL_GIT")
+		os.Exit(1)
+	}
+	out, err := exec.Command(realGit, "rev-parse", "HEAD").Output()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func fakeGitForward(args []string, realGit string) {
 	if realGit == "" {
 		fmt.Fprintln(os.Stderr, "missing FAKE_CLI_REAL_GIT")
@@ -340,16 +431,71 @@ func fakeGlabHandler(args []string) {
 			fmt.Println(mrViewJSON)
 			os.Exit(0)
 		}
+		if state, ok := fakeGlabMRState(); ok {
+			fmt.Println(state)
+			os.Exit(0)
+		}
 		os.Exit(1)
 	}
 	if len(args) >= 2 && args[0] == "mr" && args[1] == "update" {
+		fakeGlabRecordMR(args, 0)
 		os.Exit(0)
 	}
 	if len(args) >= 2 && args[0] == "mr" && args[1] == "create" {
+		fakeGlabRecordMR(args, 99)
 		fmt.Println("https://gitlab.com/test/repo/-/merge_requests/99")
 		os.Exit(0)
 	}
 	os.Exit(1)
+}
+
+// fakeGlabRecordMR keeps a created or updated merge request's title and
+// description in FAKE_CLI_MR_STATE_FILE, so a later `glab mr view` - which the
+// PR step uses to verify the body it published - reads back what was published.
+// A flag the update omits keeps the recorded value, mirroring GitLab's
+// partial-update semantics. State is only kept when the variable is set;
+// without it the handler answers statically from FAKE_CLI_MR_VIEW_JSON.
+func fakeGlabRecordMR(args []string, iid int) {
+	path := os.Getenv("FAKE_CLI_MR_STATE_FILE")
+	if path == "" {
+		return
+	}
+	record := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &record)
+	}
+	if value, ok := fakeCLIFlagValue(args, "--title"); ok {
+		record["title"] = value
+	}
+	if value, ok := fakeCLIFlagValue(args, "--description"); ok {
+		record["description"] = value
+	}
+	if iid != 0 {
+		record["iid"] = iid
+	}
+	record["web_url"] = fmt.Sprintf("https://gitlab.com/test/repo/-/merge_requests/%v", record["iid"])
+	data, err := json.Marshal(record)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// fakeGlabMRState renders the recorded merge request as `glab mr view` would.
+func fakeGlabMRState() (string, bool) {
+	path := os.Getenv("FAKE_CLI_MR_STATE_FILE")
+	if path == "" {
+		return "", false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return "", false
+	}
+	return string(data), true
 }
 
 func fakeCLIFlagValue(args []string, flag string) (string, bool) {
@@ -406,7 +552,7 @@ func fakeCIGHReconcileHandler(args []string) {
 		}
 	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json headRefOid") {
-		fmt.Println(os.Getenv("FAKE_CLI_PR_HEAD_SHA"))
+		fmt.Println(fakePRHeadSHA())
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json mergeable") {
@@ -427,6 +573,10 @@ func fakeCIGHReconcileHandler(args []string) {
 
 func fakeGHHandlePRContentCommands(args []string, joined string) {
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json title,body") {
+		if raw, ok := os.LookupEnv("FAKE_CLI_PR_CONTENT_JSON"); ok {
+			fmt.Println(raw)
+			os.Exit(0)
+		}
 		title := os.Getenv("FAKE_CLI_PR_TITLE")
 		if title == "" {
 			title = "test pr"
@@ -453,18 +603,24 @@ func fakeGHHandlePRContentCommands(args []string, joined string) {
 			fmt.Fprintln(os.Stderr, editErr)
 			os.Exit(1)
 		}
-		if path := os.Getenv("FAKE_CLI_PR_BODY_FILE"); path != "" {
-			body, err := io.ReadAll(os.Stdin)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
-			}
-			if err := os.WriteFile(path, body, 0o644); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
-			}
-		}
+		fakeGHStorePRBody(args)
 		os.Exit(0)
+	}
+}
+
+func fakeGHStorePRBody(args []string) {
+	path := os.Getenv("FAKE_CLI_PR_BODY_FILE")
+	bodyFile, _ := fakeCLIFlagValue(args, "--body-file")
+	if path == "" || bodyFile != "-" {
+		return // A base-only edit must not erase the fake's body either.
+	}
+	body, err := readFakeBody()
+	if err == nil {
+		err = os.WriteFile(path, body, 0o644)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
@@ -478,11 +634,23 @@ func fakeCIGHHandler(args []string) {
 	joined := strings.Join(args, " ")
 
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
+		if authErr := os.Getenv("FAKE_CLI_AUTH_ERR"); authErr != "" {
+			fmt.Fprintln(os.Stderr, authErr)
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 	fakeGHHandlePRContentCommands(args, joined)
+	if strings.Contains(joined, "pr list") {
+		if prListJSON := os.Getenv("FAKE_CLI_PR_LIST_JSON"); prListJSON != "" {
+			fmt.Print(prListJSON)
+		} else {
+			fmt.Println("[]")
+		}
+		os.Exit(0)
+	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json headRefOid") {
-		fmt.Println(os.Getenv("FAKE_CLI_PR_HEAD_SHA"))
+		fmt.Println(fakePRHeadSHA())
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json mergeable") {
@@ -513,6 +681,10 @@ func fakeCIGHHandler(args []string) {
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "api") && strings.Contains(joined, "graphql") {
+		if strings.Contains(joined, "reviewThreads") {
+			printFakeReviewThreads(os.Getenv("FAKE_CLI_REVIEW_COMMENTS"))
+			os.Exit(0)
+		}
 		if checksErr != "" {
 			fmt.Fprintln(os.Stderr, checksErr)
 			os.Exit(1)
@@ -526,6 +698,10 @@ func fakeCIGHHandler(args []string) {
 	}
 	if strings.Contains(joined, "run rerun") {
 		fakeCIGHRerun()
+	}
+	if strings.Contains(joined, "run view") && strings.Contains(joined, "--json jobs") {
+		printFakeRunJobs()
+		os.Exit(0)
 	}
 	if strings.Contains(joined, "run view") {
 		fmt.Println("error log output")
@@ -572,7 +748,7 @@ func fakeCIGHSequenceHandler(args []string) {
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json headRefOid") {
-		fmt.Println(os.Getenv("FAKE_CLI_PR_HEAD_SHA"))
+		fmt.Println(fakePRHeadSHA())
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr checks") {
@@ -637,6 +813,10 @@ func fakeCIGHSequenceHandler(args []string) {
 	if strings.Contains(joined, "run rerun") {
 		fakeCIGHRerun()
 	}
+	if strings.Contains(joined, "run view") && strings.Contains(joined, "--json jobs") {
+		printFakeRunJobs()
+		os.Exit(0)
+	}
 	if strings.Contains(joined, "run view") {
 		fmt.Println("error log output")
 		os.Exit(0)
@@ -671,16 +851,17 @@ func fakeCIGlabHandler(args []string) {
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "mr view") {
-		fmt.Printf(`{"iid":42,"web_url":"https://gitlab.com/test/repo/-/merge_requests/42","state":%q,"has_conflicts":%s,"detailed_merge_status":%q,"head_pipeline":{"id":7}}`,
-			state, conflicts, mergeStatus)
-		fmt.Println()
-		os.Exit(0)
+		fakeCIGlabServeMRView(state, conflicts, mergeStatus)
 	}
 	if strings.Contains(joined, "mr create") {
 		fmt.Println("https://gitlab.com/test/repo/-/merge_requests/99")
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "mr update") {
+		os.Exit(0)
+	}
+	if fakeCIGlabIsPipelineJobsRead(joined) {
+		fmt.Println(checksJSON)
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "ci status") {
@@ -695,7 +876,91 @@ func fakeCIGlabHandler(args []string) {
 		fmt.Println(traceOutput)
 		os.Exit(0)
 	}
+	// The review-comment read asks for the merge request's discussion notes.
+	// FAKE_CLI_REVIEW_DISCUSSIONS is the raw array the discussions endpoint
+	// returns; an unset value answers an MR with no discussions.
+	if strings.Contains(joined, "/discussions") {
+		discussions := os.Getenv("FAKE_CLI_REVIEW_DISCUSSIONS")
+		if discussions == "" {
+			discussions = "[]"
+		}
+		fmt.Println(discussions)
+		os.Exit(0)
+	}
 	os.Exit(1)
+}
+
+// fakeCIGlabServeMRView answers `glab mr view` for the CI fakes.
+// FAKE_CLI_MR_VIEW_ERR makes the read fail like a provider or CLI failure;
+// otherwise the fakes' scripted merge request is printed.
+func fakeCIGlabServeMRView(state, conflicts, mergeStatus string) {
+	if os.Getenv("FAKE_CLI_MR_VIEW_ERR") == "1" {
+		fmt.Fprintln(os.Stderr, "merge request read failed")
+		os.Exit(1)
+	}
+	fmt.Println(fakeCIGlabMRViewJSON(state, conflicts, mergeStatus))
+	os.Exit(0)
+}
+
+// fakeCIGlabMRViewJSON renders the merge request the CI fakes serve. The source
+// revision it reports comes from FAKE_CLI_MR_HEAD_SHA, and the head pipeline
+// (id 7) ran at FAKE_CLI_PIPELINE_SHA (the source revision by default) for
+// FAKE_CLI_PIPELINE_REF. The CI step names the run's head on every poll, so a
+// GitLab check read is bound to it: a fake merge request that cannot name the
+// revision the run is delivering is refused by design, and a test that wants a
+// stale pipeline sets FAKE_CLI_PIPELINE_SHA to a different commit.
+func fakeCIGlabMRViewJSON(state, conflicts, mergeStatus string) string {
+	sourceSHA := os.Getenv("FAKE_CLI_MR_HEAD_SHA")
+	pipelineSHA := os.Getenv("FAKE_CLI_PIPELINE_SHA")
+	pipelineRef := os.Getenv("FAKE_CLI_PIPELINE_REF")
+	if pipelineSHA == "" {
+		pipelineSHA = sourceSHA
+	}
+	if pipelineRef == "" {
+		pipelineRef = "refs/heads/feature"
+	}
+	pipeline := `{"id":7}`
+	if pipelineSHA != "" {
+		pipeline = fmt.Sprintf(`{"id":7,"sha":%q,"ref":%q}`, pipelineSHA, pipelineRef)
+	}
+	return fmt.Sprintf(`{"iid":42,"web_url":"https://gitlab.com/test/repo/-/merge_requests/42","sha":%q,"state":%q,"has_conflicts":%s,"detailed_merge_status":%q,"head_pipeline":%s}`,
+		sourceSHA, state, conflicts, mergeStatus, pipeline)
+}
+
+// fakeCIGlabIsPipelineJobsRead reports whether the invocation is the REST jobs
+// read the adapter uses when a project path is known: a pipeline's job list is
+// read through `glab api --paginate projects/<path>/pipelines/<id>/jobs`.
+func fakeCIGlabIsPipelineJobsRead(joined string) bool {
+	return strings.HasPrefix(joined, "api ") && strings.Contains(joined, "/pipelines/") && strings.HasSuffix(joined, "/jobs")
+}
+
+// fakeCIGlabSequenceChecks returns the next entry of the checks sequence the
+// ci-glab-seq fake serves and advances the index, so a test can script a
+// pending job followed by a passing one. The index sticks at the last entry.
+func fakeCIGlabSequenceChecks() (string, bool) {
+	data, err := os.ReadFile(os.Getenv("FAKE_CLI_CHECKS_PATH"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return "", false
+	}
+	entries := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(entries) == 0 || entries[0] == "" {
+		return "[]", true
+	}
+	index := 0
+	if rawIndex, err := os.ReadFile(os.Getenv("FAKE_CLI_CHECKS_INDEX_PATH")); err == nil {
+		if parsed, err := strconv.Atoi(strings.TrimSpace(string(rawIndex))); err == nil {
+			index = parsed
+		}
+	}
+	if index >= len(entries) {
+		index = len(entries) - 1
+	}
+	if err := os.WriteFile(os.Getenv("FAKE_CLI_CHECKS_INDEX_PATH"), []byte(strconv.Itoa(index+1)), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return "", false
+	}
+	return entries[index], true
 }
 
 func fakeCIGlabSequenceHandler(args []string) {
@@ -711,44 +976,20 @@ func fakeCIGlabSequenceHandler(args []string) {
 	if mergeStatus == "" {
 		mergeStatus = "mergeable"
 	}
-	checksPath := os.Getenv("FAKE_CLI_CHECKS_PATH")
-	indexPath := os.Getenv("FAKE_CLI_CHECKS_INDEX_PATH")
 	joined := strings.Join(args, " ")
 
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "mr view") {
-		fmt.Printf(`{"iid":42,"web_url":"https://gitlab.com/test/repo/-/merge_requests/42","state":%q,"has_conflicts":%s,"detailed_merge_status":%q,"head_pipeline":{"id":7}}`,
-			state, conflicts, mergeStatus)
-		fmt.Println()
-		os.Exit(0)
+		fakeCIGlabServeMRView(state, conflicts, mergeStatus)
 	}
-	if strings.Contains(joined, "ci status") || strings.Contains(joined, "ci get") {
-		data, err := os.ReadFile(checksPath)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
+	if fakeCIGlabIsPipelineJobsRead(joined) || strings.Contains(joined, "ci status") || strings.Contains(joined, "ci get") {
+		entry, ok := fakeCIGlabSequenceChecks()
+		if !ok {
 			os.Exit(1)
 		}
-		entries := strings.Split(strings.TrimSpace(string(data)), "\n")
-		if len(entries) == 0 || entries[0] == "" {
-			fmt.Println("[]")
-			os.Exit(0)
-		}
-		index := 0
-		if rawIndex, err := os.ReadFile(indexPath); err == nil {
-			if parsed, err := strconv.Atoi(strings.TrimSpace(string(rawIndex))); err == nil {
-				index = parsed
-			}
-		}
-		if index >= len(entries) {
-			index = len(entries) - 1
-		}
-		if err := os.WriteFile(indexPath, []byte(strconv.Itoa(index+1)), 0o644); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		fmt.Println(entries[index])
+		fmt.Println(entry)
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "ci trace") {
@@ -782,10 +1023,21 @@ func fakeCIGHNoChecksHandler(args []string) {
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json headRefOid") {
-		fmt.Println(os.Getenv("FAKE_CLI_PR_HEAD_SHA"))
+		fmt.Println(fakePRHeadSHA())
 		os.Exit(0)
 	}
 	os.Exit(1)
+}
+
+// printFakeRunJobs answers `gh run view <id> --json jobs`. The default empty
+// job list is what GitHub reports for a workflow run it is holding for
+// maintainer approval - it concluded without running anything.
+func printFakeRunJobs() {
+	raw := os.Getenv("FAKE_CLI_RUN_JOBS")
+	if raw == "" {
+		raw = "[]"
+	}
+	fmt.Printf("{\"jobs\":%s}\n", raw)
 }
 
 func printFakeWorkflowRuns() {
@@ -822,12 +1074,15 @@ func printFakeCommitChecks(raw string, args []string) {
 		Bucket      string `json:"bucket"`
 		CompletedAt string `json:"completedAt"`
 		Link        string `json:"link"`
+		// App is the check suite's app slug, rendered the way GitHub's
+		// GraphQL rollup reports it (checkSuite.app.slug). Empty omits it.
+		App string `json:"app"`
 	}
 	if err := json.Unmarshal([]byte(raw), &checks); err != nil {
 		fmt.Println(raw)
 		return
 	}
-	nodes := make([]map[string]string, 0, len(checks))
+	nodes := make([]map[string]any, 0, len(checks))
 	for _, check := range checks {
 		status := check.Status
 		if status == "" {
@@ -857,10 +1112,14 @@ func printFakeCommitChecks(raw string, args []string) {
 		if repo := fakeGraphQLRepo(args); repo != "" {
 			link = strings.Replace(link, "github.com/test/repo/", "github.com/"+repo+"/", 1)
 		}
-		nodes = append(nodes, map[string]string{
+		node := map[string]any{
 			"__typename": "CheckRun", "name": check.Name, "status": status,
 			"conclusion": conclusion, "completedAt": check.CompletedAt, "detailsUrl": link,
-		})
+		}
+		if check.App != "" {
+			node["checkSuite"] = map[string]any{"app": map[string]any{"slug": check.App}}
+		}
+		nodes = append(nodes, node)
 	}
 	response := map[string]any{
 		"data": map[string]any{
@@ -871,6 +1130,60 @@ func printFakeCommitChecks(raw string, args []string) {
 							"nodes":    nodes,
 							"pageInfo": map[string]any{"hasNextPage": false, "endCursor": ""},
 						},
+					},
+				},
+			},
+		},
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println(string(encoded))
+}
+
+// printFakeReviewThreads renders FAKE_CLI_REVIEW_COMMENTS - a JSON array of
+// {author, path, line, body} - as the reviewThreads GraphQL response the
+// GitHub backend's GetReviewComments parses, one unresolved thread per
+// comment. An empty or invalid value renders a pull request with no threads.
+func printFakeReviewThreads(raw string) {
+	var comments []struct {
+		Author string `json:"author"`
+		Path   string `json:"path"`
+		Line   int    `json:"line"`
+		Body   string `json:"body"`
+	}
+	if raw != "" {
+		if err := json.Unmarshal([]byte(raw), &comments); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	threads := make([]map[string]any, 0, len(comments))
+	for i, comment := range comments {
+		threads = append(threads, map[string]any{
+			"isResolved": false,
+			"comments": map[string]any{
+				"nodes": []map[string]any{{
+					"databaseId": i + 1,
+					"body":       comment.Body,
+					"path":       comment.Path,
+					"line":       comment.Line,
+					"url":        fmt.Sprintf("https://github.com/test/repo/pull/42#discussion_r%d", i+1),
+					"createdAt":  "2026-09-07T00:00:00Z",
+					"author":     map[string]any{"login": comment.Author},
+				}},
+			},
+		})
+	}
+	response := map[string]any{
+		"data": map[string]any{
+			"repository": map[string]any{
+				"pullRequest": map[string]any{
+					"reviewThreads": map[string]any{
+						"nodes":    threads,
+						"pageInfo": map[string]any{"hasNextPage": false, "endCursor": ""},
 					},
 				},
 			},

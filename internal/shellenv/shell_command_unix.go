@@ -3,9 +3,13 @@
 package shellenv
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -82,11 +86,25 @@ func ConfigureShellCommand(cmd *exec.Cmd) {
 	}
 }
 
+// ConfigureCooperativeShellCommand is identical to ConfigureShellCommand on
+// Unix, where every configured process group already receives SIGTERM first.
+func ConfigureCooperativeShellCommand(cmd *exec.Cmd) {
+	ConfigureShellCommand(cmd)
+}
+
 // StartShellCommand starts cmd after ConfigureShellCommand has prepared its
 // process-group lifecycle. Unix needs no extra setup beyond cmd.Start, but the
 // wrapper keeps call sites aligned with Windows job-object setup.
 func StartShellCommand(cmd *exec.Cmd) error {
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// The parent raises the child's score (inherited by grandchildren) so a later
+	// cgroup OOM prefers this step over the daemon. Linux only; a no-op elsewhere.
+	if cmd.Process != nil {
+		RaiseStepOOMScore(cmd.Process.Pid)
+	}
+	return nil
 }
 
 // TerminateShellCommandGroup terminates the whole process group led by a
@@ -129,6 +147,47 @@ func TerminateShellCommandGroup(cmd *exec.Cmd) {
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 }
 
+func ShellCommandGroupActive(cmd *exec.Cmd) (bool, error) {
+	if cmd == nil || cmd.Process == nil {
+		return false, errors.New("command was not started")
+	}
+	err := syscall.Kill(-cmd.Process.Pid, 0)
+	if errors.Is(err, syscall.ESRCH) {
+		return false, nil
+	}
+	if err != nil && !errors.Is(err, syscall.EPERM) {
+		return false, err
+	}
+	// A zombie still occupies its process group but has finished execution.
+	// Linux's signal probe succeeds for it; macOS can return EPERM instead.
+	// Inspect states with the same portable ps fields used by procreap.
+	ctx, cancel := context.WithTimeout(context.Background(), defaultWaitDelay)
+	defer cancel()
+	probe := exec.CommandContext(ctx, "ps", "-eo", "pgid=,stat=")
+	ConfigureShellCommand(probe)
+	out, err := OutputShellCommand(probe)
+	if err != nil {
+		return false, fmt.Errorf("inspect process group states: %w", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) != 2 {
+			return false, fmt.Errorf("invalid process group state: %q", line)
+		}
+		pgid, err := strconv.Atoi(fields[0])
+		if err != nil {
+			return false, fmt.Errorf("parse process group: %w", err)
+		}
+		if pgid == cmd.Process.Pid && !strings.HasPrefix(fields[1], "Z") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // groupGoneWithin reports whether the process group emptied out before the
 // window elapsed.
 func groupGoneWithin(pgid int, window time.Duration) bool {
@@ -142,4 +201,20 @@ func groupGoneWithin(pgid int, window time.Duration) bool {
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+}
+
+// detachFromTerminal runs cmd in a new session instead of merely a new process
+// group. It exists for the login-shell probe: an interactive shell (zsh -i)
+// that inherits a controlling terminal insists on being that terminal's
+// foreground process group before it runs anything, and a Setpgid child of a
+// foreground process never is, so zsh stops itself with SIGTTIN and the probe
+// sits there until the timeout kills it. That is exactly what happens when
+// `daemon run` is started from a terminal. A session of its own has no
+// controlling terminal, which is the condition the probe already works under
+// as a launchd/systemd service. Setsid also makes the child its own process
+// group leader (pgid == pid), so TerminateShellCommandGroup still reaps the
+// whole tree; Setpgid must not be combined with it because setpgid(2) fails
+// for a session leader.
+func detachFromTerminal(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 }

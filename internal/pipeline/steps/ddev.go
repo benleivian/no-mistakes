@@ -22,6 +22,17 @@ type ddevConfig struct {
 	Name string `yaml:"name"`
 }
 
+// Fork-only (see FORK.md).
+
+// cleanupTemporaryDDEVProjectAfterTest is deferred by TestStep.Execute so the
+// temporary DDEV project is removed however the step ends; a failure is only
+// logged.
+func cleanupTemporaryDDEVProjectAfterTest(sctx *pipeline.StepContext) {
+	if err := cleanupTemporaryDDEVProject(sctx); err != nil {
+		sctx.Log(fmt.Sprintf("warning: clean temporary DDEV project: %v", err))
+	}
+}
+
 // cleanupTemporaryDDEVProject deletes only the matching temporary DDEV project
 // for this run's isolated worktree. It deliberately leaves the worktree intact:
 // later review, CI, and approval still need it.

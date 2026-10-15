@@ -150,7 +150,11 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 			Total    *int `json:"total"`
 		} `json:"search_info"`
 	}
-	args := []string{"--repo", h.repository, "--head", branch, "--base", base, "--state", "open"}
+	args := []string{"--repo", h.repository, "--head", branch}
+	if base != "" {
+		args = append(args, "--base", base)
+	}
+	args = append(args, "--state", "open")
 	if err := h.runJSON(ctx, "pr find", args, &response); err != nil {
 		return nil, err
 	}
@@ -174,7 +178,7 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 	if err != nil {
 		return nil, err
 	}
-	if response.PullRequest.Head != branch || response.PullRequest.Base != base {
+	if response.PullRequest.Head != branch || (base != "" && response.PullRequest.Base != base) {
 		return nil, fmt.Errorf("Forgejo PR branch identity mismatch: got %q -> %q, expected %q -> %q", response.PullRequest.Head, response.PullRequest.Base, branch, base)
 	}
 	return pr, nil
@@ -208,7 +212,11 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 		Updated     bool        `json:"updated"`
 		PullRequest pullRequest `json:"pull_request"`
 	}
-	args := []string{"--repo", h.repository, number, "--title", content.Title, "--body", content.Body}
+	args := []string{"--repo", h.repository, number}
+	if content.Title != "" {
+		args = append(args, "--title", content.Title)
+	}
+	args = append(args, "--body", content.Body)
 	if err := h.runJSON(ctx, "pr update", args, &response); err != nil {
 		return nil, err
 	}
@@ -616,10 +624,11 @@ func (h *Host) normalizeChecks(result checksResult) ([]scm.Check, error) {
 			return nil, err
 		}
 		check := scm.Check{
-			Name:   status.Context,
-			Bucket: bucket,
-			State:  status.State,
-			Link:   stringValue(status.TargetURL),
+			Name:       status.Context,
+			ProviderID: "forgejo-status:" + status.Context,
+			Bucket:     bucket,
+			State:      status.State,
+			Link:       stringValue(status.TargetURL),
 		}
 		if status.UpdatedAt != nil {
 			check.CompletedAt, err = time.Parse(time.RFC3339, *status.UpdatedAt)
@@ -1078,6 +1087,15 @@ func stringValue(value *string) string {
 // origins; recognizable HTTPS Forgejo origins can infer a path prefix from all
 // path segments before OWNER/REPO.
 func ResolveRemote(remote, configuredBase, resolvedSSHHost string) (string, string, error) {
+	return ResolveRemoteWithSSHDomain(remote, configuredBase, resolvedSSHHost, "")
+}
+
+// ResolveRemoteWithSSHDomain is ResolveRemote with the SSH hostname declared
+// through FORGEJO_SSH_DOMAIN, which mirrors Forgejo's own SSH_DOMAIN setting. An
+// SSH remote is accepted when its resolved host is either the configured base
+// URL's host or that declared hostname; every other input behaves exactly as
+// ResolveRemote.
+func ResolveRemoteWithSSHDomain(remote, configuredBase, resolvedSSHHost, declaredSSHDomain string) (string, string, error) {
 	remoteHost, remotePath, remoteScheme, err := parseRemote(remote)
 	if err != nil {
 		return "", "", err
@@ -1101,8 +1119,8 @@ func ResolveRemote(remote, configuredBase, resolvedSSHHost string) (string, stri
 			if resolvedSSHHost == "" {
 				resolvedSSHHost = remoteHost
 			}
-			if !strings.EqualFold(resolvedSSHHost, baseURL.Hostname()) {
-				return "", "", fmt.Errorf("remote host %q does not match configured Forgejo host %q", resolvedSSHHost, baseURL.Hostname())
+			if err := checkSSHHost(resolvedSSHHost, baseURL.Hostname(), declaredSSHDomain); err != nil {
+				return "", "", err
 			}
 		}
 		prefix := strings.Trim(baseURL.Path, "/")
@@ -1137,6 +1155,31 @@ func ResolveRemote(remote, configuredBase, resolvedSSHHost string) (string, stri
 		return "", "", err
 	}
 	return base, repo, nil
+}
+
+// checkSSHHost accepts an SSH remote's resolved host when it belongs to the
+// configured Forgejo instance: either the host of its web base URL or the
+// separate clone host declared through FORGEJO_SSH_DOMAIN. An unusable declared
+// domain never widens the accepted hosts, and a rejection names the resolved
+// host, every accepted host, and a declared domain that had to be ignored.
+func checkSSHHost(resolvedSSHHost, baseHostname, declaredSSHDomain string) error {
+	if strings.EqualFold(resolvedSSHHost, baseHostname) {
+		return nil
+	}
+	domain, err := scm.NormalizeForgejoSSHDomain(declaredSSHDomain)
+	if err != nil {
+		if strings.TrimSpace(declaredSSHDomain) == "" {
+			return fmt.Errorf("remote host %q does not match configured Forgejo host %q", resolvedSSHHost, baseHostname)
+		}
+		// err is value-free by construction (see errInvalidForgejoSSHDomain): this
+		// text reaches a step's skip reason, the step log, and the run database,
+		// and the rejected setting can hold a pasted credential.
+		return fmt.Errorf("remote host %q does not match configured Forgejo host %q, and FORGEJO_SSH_DOMAIN was ignored: %w", resolvedSSHHost, baseHostname, err)
+	}
+	if scm.ForgejoSSHDomainMatchesHost(resolvedSSHHost, domain) {
+		return nil
+	}
+	return fmt.Errorf("remote host %q does not match configured Forgejo host %q or declared FORGEJO_SSH_DOMAIN %q", resolvedSSHHost, baseHostname, domain)
 }
 
 func parseRemote(remote string) (host, remotePath, scheme string, err error) {

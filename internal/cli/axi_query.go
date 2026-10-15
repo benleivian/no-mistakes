@@ -15,7 +15,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
-	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
 )
@@ -32,45 +31,39 @@ func newAxiStatusCmd() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return trackReadSurface("axi-status", telemetry.Fields{
-				"explicit_run_id": strings.TrimSpace(runID) != "",
-			}, func() (string, string, error) {
-				fingerprint, err := runAxiStatus(cmd, runID)
-				return fingerprint, "", err
-			})
+			return runAxiStatus(cmd, runID)
 		},
 	}
 	cmd.Flags().StringVar(&runID, "run", "", "inspect a specific run ID (default: current branch's active or most recent)")
 	return cmd
 }
 
-// runAxiStatus renders the run status and returns a low-cardinality state
-// fingerprint (run id, run status, per-step statuses) used to dedupe the
-// command's telemetry across repeated polls.
-func runAxiStatus(cmd *cobra.Command, runID string) (string, error) {
+// runAxiStatus renders the run status for the current branch or an explicit
+// --run selection. It is a read-only query: it does not emit telemetry.
+func runAxiStatus(cmd *cobra.Command, runID string) error {
 	env, err := openAxiQueryEnv(runID)
 	if err != nil {
-		return "", emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
+		return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
 	}
 	defer env.close()
 
 	branch, branchErr := currentBranchForRunResolve(cmd.Context())
 	if branchErr != nil && runID == "" {
-		return "", emitError(cmd, 1, branchErr.Error())
+		return emitError(cmd, 1, branchErr.Error())
 	}
 	run, runs, err := resolveRun(env, runID, branch)
 	if err != nil {
-		return "", emitError(cmd, 1, err.Error())
+		return emitError(cmd, 1, err.Error())
 	}
 
 	if run == nil {
 		if runID != "" {
-			return "", emitError(cmd, 1, fmt.Sprintf("run %q not found", runID))
+			return emitError(cmd, 1, fmt.Sprintf("run %q not found", runID))
 		}
 		if branch == "" {
 			runs, err = env.d.GetRunsByRepo(env.repo.ID)
 			if err != nil {
-				return "", emitError(cmd, 1, fmt.Sprintf("list runs: %v", err))
+				return emitError(cmd, 1, fmt.Sprintf("list runs: %v", err))
 			}
 		}
 		return emitNoRunForCaller(cmd, env, branch, runs)
@@ -78,7 +71,7 @@ func runAxiStatus(cmd *cobra.Command, runID string) (string, error) {
 
 	steps, err := env.d.GetStepsByRun(run.ID)
 	if err != nil {
-		return "", emitError(cmd, 1, fmt.Sprintf("load steps: %v", err))
+		return emitError(cmd, 1, fmt.Sprintf("load steps: %v", err))
 	}
 	rv := runViewFromDB(run, steps, env.d)
 	annotateRunView(env, &rv)
@@ -102,9 +95,9 @@ func runAxiStatus(cmd *cobra.Command, runID string) (string, error) {
 		// The label above and the commands below deliberately use different
 		// evidence rules. Branch equality is enough to label the selected run,
 		// but not enough to attach a bare mutation command to it: another active
-		// run may exist (or appear) on the same branch, and `axi respond` has no
-		// run selector. Keep every explicit selection inspection-only so its run
-		// identity cannot be lost between this status read and the next command.
+		// run may exist (or appear) on the same branch, and a bare `axi respond`
+		// answers the branch's run. Keep status inspection-only; the response
+		// command for an explicit selection is `axi respond --run <id>`.
 		branchScopedCommandsSafe := runID == ""
 		if !branchScopedCommandsSafe {
 			fields = append(fields, inspectionOnlyGateFields(gate, run.ID)...)
@@ -121,7 +114,7 @@ func runAxiStatus(cmd *cobra.Command, runID string) (string, error) {
 		}
 	}
 	emitDoc(cmd, fields...)
-	return runStateFingerprint(rv), nil
+	return nil
 }
 
 // emitNoRunForCaller answers `axi status` when the caller has no run of its
@@ -129,7 +122,7 @@ func runAxiStatus(cmd *cobra.Command, runID string) (string, error) {
 // It never substitutes some other branch's run. It names the branch it looked
 // for, lists the repository's recent runs so a deliberate
 // `--run <id>` inspection is one step away, and provides next-step help.
-func emitNoRunForCaller(cmd *cobra.Command, env *axiEnv, branch string, runs []*db.Run) (string, error) {
+func emitNoRunForCaller(cmd *cobra.Command, env *axiEnv, branch string, runs []*db.Run) error {
 	branchDisplay := branch
 	if branchDisplay == "" {
 		branchDisplay = "unknown"
@@ -151,29 +144,7 @@ func emitNoRunForCaller(cmd *cobra.Command, env *axiEnv, branch string, runs []*
 	}
 	fields = append(fields, toon.Field{Key: "help", Value: help})
 	emitDoc(cmd, fields...)
-	return env.repo.ID + "|no-run-for:" + branchDisplay + "|runs:" + renderedRunsFingerprint(runs, recentRunsHomeLimit), nil
-}
-
-// runStateFingerprint summarizes a run's observable state for telemetry
-// dedupe: any run/step status transition changes the fingerprint.
-func runStateFingerprint(rv runView) string {
-	var b strings.Builder
-	b.WriteString(rv.ID)
-	b.WriteByte('|')
-	b.WriteString(rv.Branch)
-	b.WriteByte('|')
-	b.WriteString(rv.Status)
-	b.WriteByte('|')
-	b.WriteString(rv.HeadSHA)
-	b.WriteByte('|')
-	b.WriteString(rv.PRURL)
-	for _, step := range rv.Steps {
-		b.WriteByte('|')
-		b.WriteString(step.Name)
-		b.WriteByte(':')
-		b.WriteString(step.Status)
-	}
-	return b.String()
+	return nil
 }
 
 func annotateRunView(env *axiEnv, rv *runView) {
@@ -225,109 +196,119 @@ func newAxiLogsCmd() *cobra.Command {
 	var full bool
 	cmd := &cobra.Command{
 		Use:           "logs",
-		Short:         "Show the log output of one pipeline step",
+		Short:         "Show one pipeline step's recorded findings and log output",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return trackReadSurface("axi-logs", telemetry.Fields{
-				"step":            sanitizeAxiTelemetryStep(step),
-				"full":            full,
-				"explicit_run_id": strings.TrimSpace(runID) != "",
-			}, func() (string, string, error) {
-				fingerprint, err := runAxiLogs(cmd, step, runID, full)
-				return fingerprint, "", err
-			})
+			return runAxiLogs(cmd, step, runID, full)
 		},
 	}
-	cmd.Flags().StringVar(&step, "step", "", "step name: intent, rebase, review, test, document, lint, push, pr, ci (required)")
+	cmd.Flags().StringVar(&step, "step", "", "step name: intent, rebase, review, test, document, lint, push, pr, ci, or a repository gate step name (required)")
 	cmd.Flags().StringVar(&runID, "run", "", "run ID (default: current branch's active or most recent)")
-	cmd.Flags().BoolVar(&full, "full", false, "show the entire log instead of the tail")
+	cmd.Flags().BoolVar(&full, "full", false, "show the complete summary and the entire log instead of the bounded summary and tail")
 	return cmd
 }
 
-// runAxiLogs renders a step log and returns a run+step telemetry fingerprint:
-// repeated reads of the same step's log carry no distinct analytics signal,
-// so only switching run or step (or the heartbeat) re-emits.
-func runAxiLogs(cmd *cobra.Command, step, runID string, full bool) (string, error) {
+// validLogStepsHelp names every step whose log this command can read. A
+// repository gate keeps its own step log, and the truncation marker a failing
+// command gate emits tells the operator to read it with exactly this command,
+// so the gate names have to be accepted here.
+const validLogStepsHelp = "Valid steps: intent, rebase, review, test, document, lint, push, pr, ci, " +
+	"or a repository gate step name as shown in `no-mistakes axi status` (for example gate.test.mutation-budget)"
+
+// runAxiLogs renders a step log. It is a read-only query: it does not emit
+// telemetry.
+func runAxiLogs(cmd *cobra.Command, step, runID string, full bool) error {
 	step = strings.TrimSpace(step)
 	if step == "" {
-		return "", emitError(cmd, 2, "--step is required",
-			"Valid steps: intent, rebase, review, test, document, lint, push, pr, ci")
+		return emitError(cmd, 2, "--step is required",
+			validLogStepsHelp)
 	}
-	if !validStep(types.StepName(step)) {
-		return "", emitError(cmd, 2, fmt.Sprintf("unknown step %q", step),
-			"Valid steps: intent, rebase, review, test, document, lint, push, pr, ci")
+	if !validReadableStep(types.StepName(step)) {
+		return emitError(cmd, 2, fmt.Sprintf("unknown step %q", step),
+			validLogStepsHelp)
 	}
 
 	env, err := openAxiQueryEnv(runID)
 	if err != nil {
-		return "", emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
+		return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
 	}
 	defer env.close()
 
 	branch, branchErr := currentBranchForRunResolve(cmd.Context())
 	if branchErr != nil && runID == "" {
-		return "", emitError(cmd, 1, branchErr.Error())
+		return emitError(cmd, 1, branchErr.Error())
 	}
 	run, _, err := resolveRun(env, runID, branch)
 	if err != nil {
-		return "", emitError(cmd, 1, err.Error())
+		return emitError(cmd, 1, err.Error())
 	}
 	if run == nil {
 		if runID != "" {
-			return "", emitError(cmd, 1, fmt.Sprintf("run %q not found", runID))
+			return emitError(cmd, 1, fmt.Sprintf("run %q not found", runID))
 		}
 		help := noRunLogsHelp()
 		if branch == "" {
 			help = []string{"This worktree has no current branch (detached HEAD), so no run can be attributed to it; inspect a specific run with `no-mistakes axi logs --run <id> --step <step>`, or check out a branch first"}
 		}
-		return "", emitError(cmd, 1, "no run found for this branch to read logs from",
+		return emitError(cmd, 1, "no run found for this branch to read logs from",
 			help...)
 	}
 	steps, err := env.d.GetStepsByRun(run.ID)
 	if err != nil {
-		return "", emitError(cmd, 1, fmt.Sprintf("load steps: %v", err))
+		return emitError(cmd, 1, fmt.Sprintf("load steps: %v", err))
 	}
-	fingerprint := runStateFingerprint(runViewFromDB(run, steps, env.d)) + "|log:" + step
 
-	path := filepath.Join(env.p.RunLogDir(run.ID), step+".log")
-	data, err := os.ReadFile(path)
 	fields := []toon.Field{
 		{Key: "step", Value: step},
 		{Key: "run", Value: run.ID},
 	}
-	if err != nil {
-		if os.IsNotExist(err) {
-			fields = append(fields, toon.Field{Key: "log", Value: fmt.Sprintf("no log recorded for step %q in this run", step)})
-			emitDoc(cmd, fields...)
-			return fingerprint, nil
+	var bounded bool
+	for _, s := range steps {
+		if string(s.StepName) == step && s.FindingsJSON != nil {
+			var recorded []toon.Field
+			recorded, bounded = recordedFindingsFields(*s.FindingsJSON, full)
+			fields = append(fields, recorded...)
+			break
 		}
-		return "", emitError(cmd, 1, fmt.Sprintf("read log: %v", err))
+	}
+	selectedRunID := ""
+	if runID != "" {
+		selectedRunID = run.ID
+	}
+	fullHelp := fmt.Sprintf("Run `%s` to see the complete summary and entire log", axiLogsFullCommand(step, selectedRunID))
+
+	data, err := os.ReadFile(filepath.Join(env.p.RunLogDir(run.ID), step+".log"))
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return emitError(cmd, 1, fmt.Sprintf("read log: %v", err))
+		}
+		fields = append(fields, toon.Field{Key: "log", Value: fmt.Sprintf("no log recorded for step %q in this run", step)})
+		if bounded {
+			fields = append(fields, toon.Field{Key: "help", Value: []string{fullHelp}})
+		}
+		emitDoc(cmd, fields...)
+		return nil
 	}
 
 	lines := splitLogLines(string(data))
 	shown := lines
+	lineCount := fmt.Sprintf("%d total", len(lines))
 	if !full && len(lines) > logTailLines {
 		shown = lines[len(lines)-logTailLines:]
-		selectedRunID := ""
-		if runID != "" {
-			selectedRunID = run.ID
-		}
-		fields = append(fields,
-			toon.Field{Key: "lines", Value: fmt.Sprintf("%d of %d total (tail)", len(shown), len(lines))},
-			toon.Field{Key: "log", Value: logRows(shown)},
-			toon.Field{Key: "help", Value: []string{fmt.Sprintf("Run `%s` to see the entire log", axiLogsFullCommand(step, selectedRunID))}},
-		)
-		emitDoc(cmd, fields...)
-		return fingerprint, nil
+		lineCount = fmt.Sprintf("%d of %d total (tail)", len(shown), len(lines))
+		bounded = true
 	}
 	fields = append(fields,
-		toon.Field{Key: "lines", Value: fmt.Sprintf("%d total", len(lines))},
+		toon.Field{Key: "lines", Value: lineCount},
 		toon.Field{Key: "log", Value: logRows(shown)},
 	)
+	if bounded {
+		fields = append(fields, toon.Field{Key: "help", Value: []string{fullHelp}})
+	}
 	emitDoc(cmd, fields...)
-	return fingerprint, nil
+	return nil
 }
 
 // logRows wraps log lines as single-column rows so the encoder renders them as
