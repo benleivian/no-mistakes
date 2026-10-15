@@ -1,11 +1,11 @@
 # Fork notes
 
 `benleivian/no-mistakes` is a fork of [`kunchenguid/no-mistakes`](https://github.com/kunchenguid/no-mistakes).
-It carries a small patch on top of upstream. Fork-only logic lives in fork-owned files, and each upstream file keeps at most a one-line call site, so upstream merges rarely conflict.
+It carries a small patch on top of upstream. DDEV cleanup logic lives in fork-owned files with small call sites in upstream files to reduce merge conflicts; the Git compatibility change below also modifies an upstream function.
 
 ## The patch
 
-**DDEV cleanup.** DDEV projects rooted in a no-mistakes worktree are deleted before the worktree is removed, and the Test step deletes its temporary DDEV project when it finishes. Behavior: [`docs/src/content/docs/guides/ddev-cleanup.md`](docs/src/content/docs/guides/ddev-cleanup.md).
+**DDEV cleanup.** Behavior and lifecycle exceptions: [`docs/src/content/docs/guides/ddev-cleanup.md`](docs/src/content/docs/guides/ddev-cleanup.md).
 
 Fork-owned files:
 
@@ -52,4 +52,4 @@ no-mistakes daemon restart
 ```
 
 `make install` also works, but it installs to `$(go env GOPATH)/bin`, which may not be the `no-mistakes` first on your `PATH`.
-Restarting the daemon interrupts in-flight pipeline runs.
+Follow the [daemon lifecycle guard](docs/src/content/docs/concepts/daemon.md#starting-and-stopping) when restarting; active runs can prevent the restart.
