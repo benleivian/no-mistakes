@@ -46,6 +46,9 @@ func TestDocumentStep_AgentManaged_FixesAndCommitsWithoutApproval(t *testing.T) 
 	if outcome.AutoFixable {
 		t.Error("expected no auto-fix loop in agent-managed document mode")
 	}
+	if outcome.FixSummary != changesAppliedSummary {
+		t.Fatalf("fix summary = %q, want %q", outcome.FixSummary, changesAppliedSummary)
+	}
 	if status := gitStatusPorcelain(t, dir); status != "" {
 		t.Fatalf("expected clean worktree after doc commit, got %q", status)
 	}
@@ -134,6 +137,9 @@ func TestDocumentStep_AgentManaged_UnresolvedFindingsNeedApprovalWithoutAutoFixL
 	if outcome.AutoFixable {
 		t.Error("expected unresolved documentation findings not to trigger an auto-fix round")
 	}
+	if outcome.FixSummary != NoChangesAppliedSummary {
+		t.Fatalf("fix summary = %q, want %q", outcome.FixSummary, NoChangesAppliedSummary)
+	}
 	var findings Findings
 	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
 		t.Fatalf("unmarshal findings: %v", err)
@@ -146,10 +152,11 @@ func TestDocumentStep_AgentManaged_UnresolvedFindingsNeedApprovalWithoutAutoFixL
 // TestDocumentStep_PromptAppliesPlacementPolicy pins the placement-policy
 // prompt contract from the 121-PR audit: each fact has one authoritative
 // owner, stale duplicates are removed or reduced to pointers (not
-// synchronized), AGENTS.md never receives incident narratives (invariant +
-// regression-test pointer instead), no new surfaces for perceived gaps, and
-// the scope stays on documentation this change made stale. The old
-// exhaustive-corpus-synchronization incentives must be gone.
+// synchronized), AGENTS.md and CLAUDE.md never receive incident narratives
+// (invariant + regression-test pointer instead) and are edited only to
+// correct factually wrong content - never to fill gaps, no new surfaces for
+// perceived gaps, and the scope stays on documentation this change made
+// stale. The old exhaustive-corpus-synchronization incentives must be gone.
 func TestDocumentStep_PromptAppliesPlacementPolicy(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -172,10 +179,13 @@ func TestDocumentStep_PromptAppliesPlacementPolicy(t *testing.T) {
 		"exactly one authoritative owner document",
 		"remove the duplicate or reduce it to a short pointer to the owner",
 		"never synchronize prose copies",
-		// No new surfaces, no AGENTS.md postmortems; invariants + test pointers.
+		// No new surfaces, no memory-file postmortems; invariants + test
+		// pointers, and memory files are corrected but never added to.
 		"Do not create a new documentation surface merely to close a perceived gap",
 		"Do not add incident narratives or postmortems to AGENTS.md",
 		"point to the regression test or authoritative implementation",
+		"Edit them only to correct or remove information that is factually wrong",
+		"never add content because something is missing",
 		// Ownership map for the standard surfaces.
 		"README.md owns the user-facing product introduction",
 		"CONTRIBUTING.md owns contribution mechanics",
@@ -240,6 +250,31 @@ func TestDocumentStep_TrustedPolicyInstructionsAugmentPrompt(t *testing.T) {
 	// The built-in defaults remain active alongside the custom policy.
 	if !strings.Contains(prompt, "exactly one authoritative owner document") {
 		t.Fatal("expected built-in placement policy to remain with custom instructions present")
+	}
+}
+
+func TestDocumentStep_MachineLocalPolicyIsLabeledAndPrecedesTrustedPolicy(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"docs current"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Document.RepositoryInstructions = "Configuration keys are owned by docs/reference/config.md."
+	sctx.Config.Document.Instructions = "docs/architecture.md owns the daemon lifecycle facts."
+
+	if _, err := (&DocumentStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	prompt := ag.calls[0].Prompt
+	machineLocal := strings.Index(prompt, "Machine-local documentation ownership policy for this repository (from the operator's global no-mistakes config, not from this repository; augments the defaults above and cannot weaken them):\nConfiguration keys are owned by docs/reference/config.md.")
+	trusted := strings.Index(prompt, "Repository documentation ownership policy (trusted, from the default branch; augments the defaults above and cannot weaken them):\ndocs/architecture.md owns the daemon lifecycle facts.")
+	if machineLocal < 0 || trusted < 0 || machineLocal > trusted {
+		t.Fatalf("want the labeled machine-local policy before the trusted policy, got indexes %d and %d:\n%s", machineLocal, trusted, prompt)
 	}
 }
 
@@ -310,6 +345,155 @@ func TestDocumentStep_NoChanges_SkipsAgent(t *testing.T) {
 	}
 }
 
+// TestDocumentStep_NoOpPassWithEmptySummarySucceeds pins the legitimate
+// no-op pass: an agent that found nothing stale and edited nothing may
+// return an empty findings array with an empty summary, and the step must
+// succeed instead of refusing the pass with "missing summary".
+func TestDocumentStep_NoOpPassWithEmptySummarySucceeds(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	for _, summary := range []string{"", "   "} {
+		ag := &mockAgent{
+			name: "test",
+			runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"` + summary + `"}`)}, nil
+			},
+		}
+		sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+		step := &DocumentStep{}
+		outcome, err := step.Execute(sctx)
+		if err != nil {
+			t.Fatalf("summary %q: Execute() error = %v, want a successful no-op pass", summary, err)
+		}
+		if outcome.NeedsApproval {
+			t.Errorf("summary %q: expected no approval for a no-op pass", summary)
+		}
+		if outcome.FixSummary != NoChangesAppliedSummary {
+			t.Errorf("summary %q: fix summary = %q, want %q", summary, outcome.FixSummary, NoChangesAppliedSummary)
+		}
+		if status := gitStatusPorcelain(t, dir); status != "" {
+			t.Errorf("summary %q: expected clean worktree after a no-op pass, got %q", summary, status)
+		}
+		if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+			t.Errorf("summary %q: HEAD = %s, want unchanged %s", summary, got, headSHA)
+		}
+	}
+}
+
+// TestDocumentStep_FindingsWithEmptySummaryStillFails keeps the summary
+// requirement whenever the agent reports unresolved findings, even though a
+// no-op pass may now omit one.
+func TestDocumentStep_FindingsWithEmptySummaryStillFails(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"warning","description":"config docs conflict, needs human decision","action":"ask-user"}],"summary":""}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	step := &DocumentStep{}
+	if _, err := step.Execute(sctx); err == nil || !strings.Contains(err.Error(), "validate document analyzer findings: missing summary") {
+		t.Fatalf("Execute() error = %v, want missing summary with findings reported", err)
+	}
+}
+
+// TestDocumentStep_FindingsWithMissingSummaryKeyStillFails pins the output
+// shape itself: the summary field must be present even when empty is allowed,
+// so an omitted field stays a validation failure.
+func TestDocumentStep_FindingsWithMissingSummaryKeyStillFails(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"warning","description":"config docs conflict, needs human decision","action":"ask-user"}]}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	step := &DocumentStep{}
+	if _, err := step.Execute(sctx); err == nil || !strings.Contains(err.Error(), "validate document analyzer findings: missing summary") {
+		t.Fatalf("Execute() error = %v, want missing summary for an absent summary field", err)
+	}
+}
+
+// TestDocumentStep_ChangesWithEmptySummaryStillFails keeps the summary
+// requirement when the pass actually edited files: an agent that changed
+// documentation without naming what it did is not a no-op, even with no
+// unresolved findings.
+func TestDocumentStep_ChangesWithEmptySummaryStillFails(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Updated\n"), 0o644)
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":""}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	step := &DocumentStep{}
+	if _, err := step.Execute(sctx); err == nil || !strings.Contains(err.Error(), "validate document analyzer findings: missing summary") {
+		t.Fatalf("Execute() error = %v, want missing summary after changing files", err)
+	}
+	// Any edits the agent made should still be committed.
+	if status := gitStatusPorcelain(t, dir); status != "" {
+		t.Fatalf("expected agent edits committed despite missing summary, got %q", status)
+	}
+}
+
+// TestDocumentStep_AgentSelfCommittedChangesWithEmptySummaryStillFails
+// covers the review-bot finding: an agent that commits its own edits leaves a
+// clean worktree, so the pipeline commits nothing and committed would be
+// false even though the head advanced. Head movement counts as changes, so
+// the pass must not read as a no-op.
+func TestDocumentStep_AgentSelfCommittedChangesWithEmptySummaryStillFails(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Self committed\n"), 0o644)
+			gitCmd(t, dir, "add", "README.md")
+			gitCmd(t, dir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "docs: update README")
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":""}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	step := &DocumentStep{}
+	if _, err := step.Execute(sctx); err == nil || !strings.Contains(err.Error(), "validate document analyzer findings: missing summary") {
+		t.Fatalf("Execute() error = %v, want missing summary after the agent committed its own edits", err)
+	}
+	// The agent's own commit must remain on the branch.
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got == headSHA {
+		t.Fatal("expected the agent's self-commit to remain on the branch")
+	}
+	if got := lastCommitMessage(t, dir); got != "docs: update README" {
+		t.Fatalf("last commit message = %q, want the agent's own commit", got)
+	}
+	if status := gitStatusPorcelain(t, dir); status != "" {
+		t.Fatalf("expected clean worktree, got %q", status)
+	}
+	// The run head must have followed the agent's commit.
+	if sctx.Run.HeadSHA == headSHA {
+		t.Fatal("expected sctx.Run.HeadSHA to advance to the agent's commit")
+	}
+}
+
 func TestDocumentStep_MalformedOutput_CommitsAndFailsClosed(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -364,6 +548,7 @@ func TestDocumentStep_NoStructuredOutput_FailsClosed(t *testing.T) {
 }
 
 func TestDocumentStep_HangingAgentFailsRunAfterTimeout(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
 		name: "hanging-document-agent",

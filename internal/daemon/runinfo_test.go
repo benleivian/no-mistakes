@@ -39,6 +39,43 @@ func TestRunToInfoIncludesImmutableSubmittedHead(t *testing.T) {
 	if info.SubmittedHeadSHA == nil || *info.SubmittedHeadSHA != "submitted-head" {
 		t.Fatalf("submitted head = %v, want submitted-head", info.SubmittedHeadSHA)
 	}
+	step, err := d.InsertStepResult(run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const reason = "provider unavailable"
+	if err := d.CompleteSkippedStep(step.ID, 0, 10, "ci.log", reason); err != nil {
+		t.Fatal(err)
+	}
+	results, err := d.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info = runToInfo(d, run, results)
+	if len(info.Steps) != 1 || info.Steps[0].SkipReason != reason {
+		t.Fatalf("IPC lost automatic skip cause: %+v", info.Steps)
+	}
+}
+
+func TestRunToInfoKeepsCIOverrideReasonCISpecific(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	run := &db.Run{ID: "run-1", Status: types.RunCompleted}
+	testReason := "configured test command failed"
+	ciReason := "live checks still failing: required-check"
+	steps := []*db.StepResult{
+		{ID: "test", RunID: run.ID, StepName: types.StepTest, OverrideReason: &testReason},
+		{ID: "ci", RunID: run.ID, StepName: types.StepCI, OverrideReason: &ciReason},
+	}
+
+	info := runToInfo(d, run, steps)
+	if info.CIOverrideReason != ciReason {
+		t.Fatalf("CIOverrideReason = %q, want %q", info.CIOverrideReason, ciReason)
+	}
 }
 
 func TestStepToInfoIncludesFixSummaries(t *testing.T) {
